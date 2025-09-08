@@ -1822,6 +1822,72 @@ class Ai_ChatbotApiModuleFrontController extends ModuleFrontController
 
     private function detectIntent(string $message, string $lang): string
     {
+        return $this->detectIntentWithAI($message, $lang);
+    }
+
+    private function detectIntentWithAI(string $message, string $lang): string
+    {
+        $apiKey = (string) Configuration::get('AI_CHATBOT_API_KEY');
+        if (!$apiKey) {
+            $this->log('INTENT_AI: OpenAI API key is missing. Falling back to legacy method.');
+            return $this->detectIntentLegacy($message, $lang);
+        }
+
+        $client = $this->http($apiKey);
+
+        // Translate to English for more reliable classification
+        $processedMessage = $message;
+        if ($lang === 'fr') {
+            $processedMessage = $this->translate($message, 'en', 'fr', 'intent-detection');
+            $this->log('INTENT_AI: Translated French message for intent detection: "' . $processedMessage . '"');
+        }
+
+        $systemPrompt = <<<PROMPT
+You are an intent detection assistant for an e-commerce chatbot.
+Your task is to classify the user's message into one of the following categories:
+- "order": For messages about tracking an existing order, checking order status, or finding an order.
+- "catalog": For messages about finding products, searching for categories (e.g., "shoes", "laptops"), asking about brands, colors, sizes, price, or stock.
+- "smalltalk": For greetings, thanks, goodbyes, or other conversational chat that is not a specific request.
+- "faq": For general questions that might be in a FAQ, such as questions about return policies, shipping options, or payment methods.
+
+The user's message is: "$processedMessage"
+Respond with only the category name and nothing else.
+PROMPT;
+
+        try {
+            $response = $client->post('chat/completions', [
+                'json' => [
+                    'model' => self::CHAT_MODEL,
+                    'messages' => [
+                        ['role' => 'system', 'content' => $systemPrompt]
+                    ],
+                    'max_tokens' => 10,
+                    'temperature' => 0.0,
+                ]
+            ]);
+
+            $data = json_decode((string)$response->getBody(), true);
+            $intent = strtolower(trim($data['choices'][0]['message']['content'] ?? ''));
+
+            $this->log('INTENT_AI: Raw response: ' . ($data['choices'][0]['message']['content'] ?? 'N/A'));
+
+            $validIntents = ['order', 'catalog', 'smalltalk', 'faq'];
+            if (in_array($intent, $validIntents, true)) {
+                $this->log('INTENT_AI: Detected intent: ' . $intent);
+                return $intent;
+            }
+
+            $this->log('INTENT_AI: Could not classify intent, falling back to legacy. Response was: ' . $intent);
+            return $this->detectIntentLegacy($message, $lang); // Fallback
+
+        } catch (\Throwable $e) {
+            $this->log('INTENT_AI: Error calling OpenAI for intent detection: ' . $e->getMessage());
+            return $this->detectIntentLegacy($message, $lang);
+        }
+    }
+
+    private function detectIntentLegacy(string $message, string $lang): string
+    {
         $lowerMsg = mb_strtolower($message, 'UTF-8');
         
         $this->log('INTENT DETECTION: Analyzing message: "' . $message . '"');
