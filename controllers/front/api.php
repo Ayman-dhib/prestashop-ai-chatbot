@@ -241,7 +241,7 @@ class Ai_ChatbotApiModuleFrontController extends ModuleFrontController
             $greetingReplies = [
                 "Salut ! 👋 Comment puis-je vous aider (produits, prix, stock, commandes, retours) ?",
                 "Bonjour ! En quoi puis-je vous être utile aujourd'hui ?",
-                "Bonjour ! Je suis là pour vous aider. Que cherchez-vous ?"
+                "Hello ! Je suis là pour vous aider. Que cherchez-vous ?"
             ];
             
             $thanksPatterns = ['merci', 'thank you', 'thanks'];
@@ -1722,15 +1722,26 @@ class Ai_ChatbotApiModuleFrontController extends ModuleFrontController
         // Remove extra spaces and normalize
         $text = preg_replace('/\s+/', ' ', trim($text));
         
+        // Question word patterns (start of sentence or after punctuation)
         $questionWords = [
-            'how', 'what', 'why', 'when', 'where', 'which', 'who',
-            'can i', 'could i', 'should i', 'would i', 'may i', 'might i',
-            'is it', 'are there', 'do you', 'does it', 'will you',
-            'am i able', 'is there a way', 'is it possible'
+            'en' => [
+                'how', 'what', 'why', 'when', 'where', 'which', 'who',
+                'can i', 'could i', 'should i', 'would i', 'may i', 'might i',
+                'is it', 'are there', 'do you', 'does it', 'will you',
+                'am i able', 'is there a way', 'is it possible'
+            ],
+            'fr' => [
+                'comment', 'que', 'quoi', 'pourquoi', 'quand', 'où', 'quel', 'quelle', 'qui',
+                'puis-je', 'peux-je', 'est-ce que je peux', 'est-ce que je dois',
+                'y a-t-il', 'est-il possible', 'peut-on', 'doit-on',
+                'suis-je capable', 'existe-t-il un moyen'
+            ]
         ];
         
+        $allQuestionWords = array_merge($questionWords['en'], $questionWords['fr']);
+        
         // Check if starts with question words
-        foreach ($questionWords as $qword) {
+        foreach ($allQuestionWords as $qword) {
             $pattern = '/^' . preg_quote($qword, '/') . '\b/iu';
             if (preg_match($pattern, $text)) {
                 return true;
@@ -1747,6 +1758,7 @@ class Ai_ChatbotApiModuleFrontController extends ModuleFrontController
             '/\b(how do i|how can i|how to)\b/iu',
             '/\b(what should|what can|what if)\b/iu',
             '/\b(is there|are there|will there)\b/iu',
+            '/\b(comment faire|comment puis|que faire si)\b/iu'
         ];
         
         foreach ($midQuestionPatterns as $pattern) {
@@ -1764,13 +1776,13 @@ class Ai_ChatbotApiModuleFrontController extends ModuleFrontController
      */
     private function isSpecificActionRequest(string $text): bool
     {
-        // Action request patterns (now English-only)
+        // Action request patterns
         $actionPatterns = [
-            '/\b(check|track|find|show|get|give me)\s+(my|the)\s+order\b/iu',
-            '/\border\s*(status)\b/iu',
-            '/\bmy\s+order\s*(#|number|reference)/iu',
-            '/\btrack\s*(order|package)/iu',
-            '/\bwhere is\s*my\s*order/iu'
+            '/\b(check|track|find|show|get|give me)\s+(my|the)\s+(order|commande)\b/iu',
+            '/\b(order|commande)\s*(status|statut|état)\b/iu',
+            '/\b(my\s+order|ma\s+commande)\s*(#|number|numéro|reference|référence)/iu',
+            '/\b(track|suivre)\s*(order|commande|package|colis)/iu',
+            '/\b(where is|où est)\s*(my|ma)\s*(order|commande)/iu'
         ];
         
         foreach ($actionPatterns as $pattern) {
@@ -1810,101 +1822,21 @@ class Ai_ChatbotApiModuleFrontController extends ModuleFrontController
 
     private function detectIntent(string $message, string $lang): string
     {
-
-        $this->log('INTENT DETECTION: Analyzing original message: "' . $message . '" in lang: ' . $lang);
-
-        // Translate to English first for consistent intent detection
-        $messageForIntent = $message;
-        if ($lang === 'fr') {
-            $messageForIntent = $this->translateForProcessing($message, $lang);
-            $this->log('INTENT DETECTION: Translated message for intent processing: "' . $messageForIntent . '"');
-        }
-
-        $lowerMsg = mb_strtolower($messageForIntent, 'UTF-8');
-
-
-        return $this->detectIntentWithAI($message, $lang);
-    }
-
-    private function detectIntentWithAI(string $message, string $lang): string
-    {
-        $apiKey = (string) Configuration::get('AI_CHATBOT_API_KEY');
-        if (!$apiKey) {
-            $this->log('INTENT_AI: OpenAI API key is missing. Falling back to legacy method.');
-            return $this->detectIntentLegacy($message, $lang);
-        }
-
-        $client = $this->http($apiKey);
-
-        // Translate to English for more reliable classification
-        $processedMessage = $message;
-        if ($lang === 'fr') {
-            $processedMessage = $this->translate($message, 'en', 'fr', 'intent-detection');
-            $this->log('INTENT_AI: Translated French message for intent detection: "' . $processedMessage . '"');
-        }
-
-        $systemPrompt = <<<PROMPT
-You are an intent detection assistant for an e-commerce chatbot.
-Your task is to classify the user's message into one of the following categories:
-- "order": For messages about tracking an existing order, checking order status, or finding an order.
-- "catalog": For messages about finding products, searching for categories (e.g., "shoes", "laptops"), asking about brands, colors, sizes, price, or stock.
-- "smalltalk": For greetings, thanks, goodbyes, or other conversational chat that is not a specific request.
-- "faq": For general questions that might be in a FAQ, such as questions about return policies, shipping options, or payment methods.
-
-The user's message is: "$processedMessage"
-Respond with only the category name and nothing else.
-PROMPT;
-
-        try {
-            $response = $client->post('chat/completions', [
-                'json' => [
-                    'model' => self::CHAT_MODEL,
-                    'messages' => [
-                        ['role' => 'system', 'content' => $systemPrompt]
-                    ],
-                    'max_tokens' => 10,
-                    'temperature' => 0.0,
-                ]
-            ]);
-
-            $data = json_decode((string)$response->getBody(), true);
-            $intent = strtolower(trim($data['choices'][0]['message']['content'] ?? ''));
-
-            $this->log('INTENT_AI: Raw response: ' . ($data['choices'][0]['message']['content'] ?? 'N/A'));
-
-            $validIntents = ['order', 'catalog', 'smalltalk', 'faq'];
-            if (in_array($intent, $validIntents, true)) {
-                $this->log('INTENT_AI: Detected intent: ' . $intent);
-                return $intent;
-            }
-
-            $this->log('INTENT_AI: Could not classify intent, falling back to legacy. Response was: ' . $intent);
-            return $this->detectIntentLegacy($message, $lang); // Fallback
-
-        } catch (\Throwable $e) {
-            $this->log('INTENT_AI: Error calling OpenAI for intent detection: ' . $e->getMessage());
-            return $this->detectIntentLegacy($message, $lang);
-        }
-    }
-
-    private function detectIntentLegacy(string $message, string $lang): string
-    {
         $lowerMsg = mb_strtolower($message, 'UTF-8');
         
         $this->log('INTENT DETECTION: Analyzing message: "' . $message . '"');
         
-
         // Check small talk first
-        if ($this->isSmallTalk($lowerMsg)) {
+        if ($this->isSmallTalk($lowerMsg, $lang)) {
             $this->log('INTENT DETECTION: Classified as smalltalk');
             return 'smalltalk';
         }
         
         // Smart order intent detection
-        if ($this->isOrderQuery($lowerMsg)) {
-            // Use the potentially translated message for these checks
-            $isQuestion = $this->isGeneralQuestion($messageForIntent);
-            $isActionRequest = $this->isSpecificActionRequest($messageForIntent);
+        if ($this->isOrderQuery($lowerMsg, $lang)) {
+            // Check if this is a general question about orders (FAQ) vs specific action request
+            $isQuestion = $this->isGeneralQuestion($message);
+            $isActionRequest = $this->isSpecificActionRequest($message);
             
             $this->log('INTENT DETECTION: Contains order keywords - isQuestion: ' . ($isQuestion ? 'yes' : 'no') . ', isActionRequest: ' . ($isActionRequest ? 'yes' : 'no'));
             
@@ -1926,7 +1858,7 @@ PROMPT;
         }
         
         // Check catalog/product queries
-        if ($this->isCatalogQuery($lowerMsg)) {
+        if ($this->isCatalogQuery($lowerMsg, $lang)) {
             $this->log('INTENT DETECTION: Classified as catalog');
             return 'catalog';
         }
@@ -1936,14 +1868,35 @@ PROMPT;
         return 'general';
     }
     
-    private function isSmallTalk(string $text): bool
+    private function isSmallTalk(string $text, string $lang): bool
     {
+        // Define patterns directly to avoid method call issues
         $patterns = [
-            'greeting' => ['patterns' => ['hi', 'hello', 'hey']],
-            'thanks' => ['patterns' => ['thanks', 'thank you']],
-            'how_are_you' => ['patterns' => ['how are you', 'how are']],
-            'goodbye' => ['patterns' => ['bye', 'goodbye', 'see you']],
-            'confirmation' => ['patterns' => ['ok', 'cool', 'great', 'awesome', 'perfect']]
+            'greeting' => [
+                'patterns' => $lang === 'fr' 
+                    ? ['salut', 'bonjour', 'coucou', 'hello', 'hi']
+                    : ['hi', 'hello', 'hey', 'bonjour', 'salut']
+            ],
+            'thanks' => [
+                'patterns' => $lang === 'fr'
+                    ? ['merci', 'thank you', 'thanks']
+                    : ['thanks', 'thank you', 'merci']
+            ],
+            'how_are_you' => [
+                'patterns' => $lang === 'fr'
+                    ? ['ça va', 'ca va', 'comment allez', 'how are']
+                    : ['how are you', 'how are', 'ça va']
+            ],
+            'goodbye' => [
+                'patterns' => $lang === 'fr'
+                    ? ['au revoir', 'à bientôt', 'bye', 'goodbye', 'tchao']
+                    : ['bye', 'goodbye', 'au revoir', 'see you']
+            ],
+            'confirmation' => [
+                'patterns' => $lang === 'fr'
+                    ? ['ok', 'cool', 'super', 'parfait', 'daccord', "d'accord"]
+                    : ['ok', 'cool', 'great', 'awesome', 'perfect']
+            ]
         ];
         
         foreach ($patterns as $category) {
@@ -1957,13 +1910,19 @@ PROMPT;
         return false;
     }
     
-    private function isOrderQuery(string $text): bool
+    private function isOrderQuery(string $text, string $lang): bool
     {
-        $keywords = ['order', 'status', 'tracking', 'delivery', 'shipped', 'track'];
+        $orderKeywords = [
+            'en' => ['order', 'status', 'tracking', 'delivery', 'shipped', 'track'],
+            'fr' => ['commande', 'statut', 'état', 'etat', 'suivi', 'livraison', 'expédié', 'suivre']
+        ];
+        
+        $keywords = array_merge($orderKeywords['en'], $orderKeywords['fr']);
         
         foreach ($keywords as $keyword) {
             if (strpos($text, $keyword) !== false) {
-                $contextKeywords = ['order', 'number', 'reference'];
+                // Additional context check - must mention order-related terms
+                $contextKeywords = ['order', 'commande', 'number', 'numéro', 'reference', 'référence'];
                 foreach ($contextKeywords as $context) {
                     if (strpos($text, $context) !== false) {
                         return true;
@@ -1975,19 +1934,29 @@ PROMPT;
         return false;
     }
     
-    private function isCatalogQuery(string $text): bool
+    private function isCatalogQuery(string $text, string $lang): bool
     {
         // Price/stock queries
-        $priceStockKeywords = ['price', 'cost', 'how much', 'stock', 'available', 'inventory'];
-        foreach ($priceStockKeywords as $keyword) {
+        $priceStockKeywords = [
+            'en' => ['price', 'cost', 'how much', 'stock', 'available', 'inventory'],
+            'fr' => ['prix', 'coûte', 'coute', 'combien', 'stock', 'disponible', 'inventaire']
+        ];
+        
+        $allPriceStock = array_merge($priceStockKeywords['en'], $priceStockKeywords['fr']);
+        foreach ($allPriceStock as $keyword) {
             if (strpos($text, $keyword) !== false) {
                 return true;
             }
         }
         
         // Product search queries
-        $searchKeywords = ['looking for', 'need', 'want to buy', 'show me', 'find', 'search', 'shoes', 'clothing', 'electronics', 'nike', 'adidas'];
-        foreach ($searchKeywords as $keyword) {
+        $searchKeywords = [
+            'en' => ['looking for', 'need', 'want to buy', 'show me', 'find', 'search', 'shoes', 'clothing', 'electronics', 'nike', 'adidas'],
+            'fr' => ['cherche', 'recherche', 'veux', 'besoin', 'trouve', 'acheter', 'chaussures', 'vêtements', 'électronique', 'nike', 'adidas']
+        ];
+        
+        $allSearch = array_merge($searchKeywords['en'], $searchKeywords['fr']);
+        foreach ($allSearch as $keyword) {
             if (strpos($text, $keyword) !== false) {
                 return true;
             }
