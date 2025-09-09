@@ -1,0 +1,113 @@
+Q: Quelle est votre politique de retour ?
+A: Vous pouvez retourner tout produit non utilisé dans les 14 jours pour un remboursement complet.
+
+Q: Livrez-vous à l'international ?
+A: Oui, nous livrons dans le monde entier. Les délais de livraison peuvent varier selon le pays.
+
+Q: Comment puis-je contacter le support ?
+A: Vous pouvez nous envoyer un email à support@example.com ou appeler au +216 55 555 555.
+
+Q: Quels modes de paiement acceptez-vous ?
+A: Nous acceptons les cartes de crédit, PayPal et les virements bancaires.
+
+Q: Avez-vous des magasins physiques ?
+A: Nous sommes uniquement une boutique en ligne, mais nous livrons partout.
+
+Q: Combien de temps prend la livraison ?
+A: Habituellement 3-5 jours ouvrables pour les commandes nationales et jusqu'à 10 jours pour les commandes internationales.
+
+Q: Comment puis-je suivre ma commande ?
+A: Une fois votre commande expédiée, vous recevrez un email avec un numéro de suivi et un lien pour le suivre en ligne.
+
+Q: Puis-je modifier ou annuler ma commande après l'avoir passée ?
+A: Vous pouvez demander des modifications ou annulations dans les 12 heures en contactant le support.
+
+Q: Offrez-vous l'emballage cadeau ?
+A: Oui, vous pouvez sélectionner l'emballage cadeau lors du paiement pour un supplément.
+
+Q: Y a-t-il des frais de livraison ?
+A: La livraison est gratuite pour les commandes de plus de 100€. Pour les commandes en dessous, les frais sont calculés au paiement.
+
+Q: Offrez-vous des réductions ou promotions ?
+A: Oui, nous organisons régulièrement des ventes et offrons des codes promo—abonnez-vous à notre newsletter pour rester informé.
+
+Q: Mes informations de paiement sont-elles sécurisées ?
+A: Absolument. Toutes les transactions sont cryptées et traitées via des passerelles de paiement sécurisées.
+
+Q: Que dois-je faire si je reçois un produit endommagé ou incorrect ?
+A: Contactez-nous dans les 48 heures avec des photos, et nous organiserons un remplacement ou remboursement.
+
+Q: Avez-vous un programme de fidélité ?
+A: Oui, vous pouvez gagner des points pour chaque achat et les échanger contre des réductions sur de futurs achats.
+
+Q: Puis-je commander en gros ou en grandes quantités ?
+A: Oui, veuillez contacter notre équipe commerciale à sales@example.com pour les tarifs de gros.
+
+Q: Offrez-vous le paiement à la livraison ?
+A: Oui, le paiement à la livraison est disponible pour certaines régions—vérifiez la disponibilité au paiement.
+
+Q: Vos produits sont-ils garantis ?
+A: Oui, la plupart des produits ont une garantie fabricant. Les détails sont fournis sur chaque page produit.
+
+Q: Puis-je créer un compte pour sauvegarder mes informations ?
+A: Oui, créer un compte vous permet de suivre les commandes, sauvegarder les adresses et accélérer les futurs achats.
+
+Q: Comment utiliser un code promo ?
+A: Entrez votre code promo au paiement dans le champ "Code de réduction" avant de finaliser le paiement.
+
+Q: Que dois-je faire si j'ai oublié mon mot de passe ?
+A: Cliquez sur "Mot de passe oublié" sur la page de connexion, et nous vous enverrons un lien pour le réinitialiser.
+
+Q: Puis-je payer en plusieurs fois ?
+A: Oui, pour certaines commandes nous offrons des options de paiement échelonné via des prestataires sélectionnés.
+
+Q: Offrez-vous la livraison le jour même ?
+A: La livraison le jour même est disponible dans certaines villes—vérifiez la disponibilité au paiement.
+
+Q: Puis-je programmer une date de livraison ?
+A: Oui, vous pouvez demander une date de livraison spécifique lors du paiement ou en contactant le support.
+
+Q: Que se passe-t-il si je rate ma livraison ?
+A: Le transporteur tentera généralement une nouvelle livraison ou laissera des instructions pour reprogrammer.
+
+Q: Vendez-vous des cartes cadeaux ?
+A: Oui, nous offrons des cartes cadeaux numériques qui peuvent être envoyées directement par email au destinataire.
+
+Q: Tous vos produits sont-ils neufs ?
+A: Oui, tous les articles sont neufs et proviennent de fournisseurs de confiance.
+
+Q: Puis-je obtenir une facture pour ma commande ?
+A: Oui, les factures sont automatiquement envoyées par email une fois votre commande confirmée.
+
+Q: Avez-vous des ventes saisonnières ?
+A: Oui, nous offrons des réductions spéciales pendant les vacances et événements saisonniers.
+
+Q: Puis-je commander depuis mon téléphone mobile ?
+A: Oui, notre site web est entièrement compatible mobile et fonctionne sur tous les appareils.
+
+Q: Offrez-vous des produits personnalisés ?
+A: Oui, certains articles peuvent être personnalisés—recherchez "Personnalisation disponible" sur la page produit.
+
+Q: Comment me désabonner de votre newsletter ?
+A: Vous pouvez cliquer sur le lien "Se désabonner" en bas de tout email de newsletter.
+
+Q: Quelles devises acceptez-vous ?
+A: Nous acceptons plusieurs devises, et le site convertit automatiquement les prix selon votre localisation.
+
+Q: Puis-je sauvegarder des articles pour les acheter plus tard ?
+A: Oui, vous pouvez ajouter des produits à votre liste de souhaits si vous avez un compte.
+
+Q: Remettez-vous en stock les articles épuisés ?
+A: Beaucoup de produits sont régulièrement remis en stock—inscrivez-vous aux alertes de stock sur la page produit.
+
+Q: Offrez-vous un emballage écologique ?
+A: Oui, nous utilisons des matériaux d'emballage recyclables quand c'est possible.
+
+Q: Puis-je passer une commande sans créer de compte ?
+A: Oui, le paiement invité est disponible, mais vous ne pourrez pas suivre l'historique de vos commandes.
+
+Q: Livrez-vous aux boîtes postales ?
+A: Certains transporteurs le font, mais vérifiez au paiement ou contactez le support pour confirmation.
+
+Q: Fournissez-vous des services d'assemblage ?
+A: Pour certains produits, le service d'assemblage est disponible pour un supplément.
