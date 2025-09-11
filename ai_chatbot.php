@@ -13,21 +13,41 @@ class Ai_Chatbot extends Module
         $this->author = 'AI Chatbot';
         $this->tab = 'front_office_features';
         $this->need_instance = 0;
+        $this->bootstrap = true;
 
         parent::__construct();
 
         $this->displayName = $this->l('AI Chatbot');
         $this->description = $this->l('Smart chatbot for FAQ, products, and customer service powered by AI.');
     }
-
     public function install()
     {
         return parent::install()
             && $this->registerHook('displayFooter')
-            && $this->registerHook('actionOrderStatusPostUpdate')
             && Configuration::updateValue('AI_CHATBOT_API_KEY', '')
             && Configuration::updateValue('AI_CHATBOT_KB_FILE', _PS_MODULE_DIR_ . $this->name . '/uploads/faq.txt')
+            && Configuration::updateValue('AI_CHATBOT_VECTOR_STORE_ID', '')
+            && Configuration::updateValue('AI_CHATBOT_FILTER_COLOR', '1')
+            && Configuration::updateValue('AI_CHATBOT_FILTER_BRAND', '1')
+            && Configuration::updateValue('AI_CHATBOT_FILTER_SIZE', '1')
+            && Configuration::updateValue('AI_CHATBOT_COUPON_ENABLED', '0')
+            && Configuration::updateValue('AI_CHATBOT_POPUP_DELAY', '3')
+            && $this->installCouponDefaults()
             && $this->installTables();
+    }
+
+    private function installCouponDefaults()
+    {
+        Configuration::updateValue('AI_CHATBOT_COUPON_ENABLED', false);
+        Configuration::updateValue('AI_CHATBOT_COUPON_AMOUNT', 10);
+        Configuration::updateValue('AI_CHATBOT_COUPON_TYPE', 'percentage');
+        Configuration::updateValue('AI_CHATBOT_COUPON_EXPIRY_DAYS', 7);
+        Configuration::updateValue('AI_CHATBOT_POPUP_FREQUENCY', 'once_per_day');
+        Configuration::updateValue('AI_CHATBOT_COUPON_MIN_CART', 0);
+        Configuration::updateValue('AI_CHATBOT_POPUP_DELAY', 3);
+        Configuration::updateValue('AI_CHATBOT_COUPON_TITLE', 'Special Offer Just For You!');
+        Configuration::updateValue('AI_CHATBOT_COUPON_MESSAGE', 'Get your exclusive discount code and save on your purchase!');
+        return true;
     }
 
     private function installTables()
@@ -84,7 +104,25 @@ class Ai_Chatbot extends Module
         return parent::uninstall()
             && Configuration::deleteByName('AI_CHATBOT_API_KEY')
             && Configuration::deleteByName('AI_CHATBOT_KB_FILE')
-            && Configuration::deleteByName('AI_CHATBOT_VECTOR_STORE_ID');
+            && Configuration::deleteByName('AI_CHATBOT_VECTOR_STORE_ID')
+            && Configuration::deleteByName('AI_CHATBOT_FILTER_COLOR')
+            && Configuration::deleteByName('AI_CHATBOT_FILTER_BRAND')
+            && Configuration::deleteByName('AI_CHATBOT_FILTER_SIZE')
+            && $this->uninstallCouponSettings();
+    }
+
+    private function uninstallCouponSettings()
+    {
+        Configuration::deleteByName('AI_CHATBOT_COUPON_ENABLED');
+        Configuration::deleteByName('AI_CHATBOT_COUPON_AMOUNT');
+        Configuration::deleteByName('AI_CHATBOT_COUPON_TYPE');
+        Configuration::deleteByName('AI_CHATBOT_COUPON_EXPIRY_DAYS');
+        Configuration::deleteByName('AI_CHATBOT_POPUP_FREQUENCY');
+        Configuration::deleteByName('AI_CHATBOT_COUPON_MIN_CART');
+        Configuration::deleteByName('AI_CHATBOT_POPUP_DELAY');
+        Configuration::deleteByName('AI_CHATBOT_COUPON_TITLE');
+        Configuration::deleteByName('AI_CHATBOT_COUPON_MESSAGE');
+        return true;
     }
 
     public function hookDisplayFooter($params)
@@ -104,6 +142,14 @@ class Ai_Chatbot extends Module
                 Configuration::updateValue('AI_CHATBOT_API_KEY', $newKey);
                 $apiKey = $newKey;
             }
+
+            // Handle coupon settings
+            $this->updateCouponSettings();
+            
+            // Update filter settings
+            Configuration::updateValue('AI_CHATBOT_FILTER_COLOR', Tools::getValue('AI_CHATBOT_FILTER_COLOR') ? '1' : '0');
+            Configuration::updateValue('AI_CHATBOT_FILTER_BRAND', Tools::getValue('AI_CHATBOT_FILTER_BRAND') ? '1' : '0');
+            Configuration::updateValue('AI_CHATBOT_FILTER_SIZE', Tools::getValue('AI_CHATBOT_FILTER_SIZE') ? '1' : '0');
 
             // Handle file upload
             if (isset($_FILES['AI_CHATBOT_KB_FILE']) && is_uploaded_file($_FILES['AI_CHATBOT_KB_FILE']['tmp_name'])) {
@@ -146,6 +192,20 @@ class Ai_Chatbot extends Module
             'AI_CHATBOT_API_KEY' => $apiKey,
             'AI_CHATBOT_KB_PATH' => $kbFile,
             'AI_CHATBOT_VECTOR_STORE_ID' => Configuration::get('AI_CHATBOT_VECTOR_STORE_ID'),
+            // Filter settings
+            'AI_CHATBOT_FILTER_COLOR' => Configuration::get('AI_CHATBOT_FILTER_COLOR'),
+            'AI_CHATBOT_FILTER_BRAND' => Configuration::get('AI_CHATBOT_FILTER_BRAND'),
+            'AI_CHATBOT_FILTER_SIZE' => Configuration::get('AI_CHATBOT_FILTER_SIZE'),
+            // Coupon settings
+            'AI_CHATBOT_COUPON_ENABLED' => Configuration::get('AI_CHATBOT_COUPON_ENABLED'),
+            'AI_CHATBOT_COUPON_AMOUNT' => Configuration::get('AI_CHATBOT_COUPON_AMOUNT'),
+            'AI_CHATBOT_COUPON_TYPE' => Configuration::get('AI_CHATBOT_COUPON_TYPE'),
+            'AI_CHATBOT_COUPON_EXPIRY_DAYS' => Configuration::get('AI_CHATBOT_COUPON_EXPIRY_DAYS'),
+            'AI_CHATBOT_POPUP_FREQUENCY' => Configuration::get('AI_CHATBOT_POPUP_FREQUENCY'),
+            'AI_CHATBOT_COUPON_MIN_CART' => Configuration::get('AI_CHATBOT_COUPON_MIN_CART'),
+            'AI_CHATBOT_POPUP_DELAY' => Configuration::get('AI_CHATBOT_POPUP_DELAY'),
+            'AI_CHATBOT_COUPON_TITLE' => Configuration::get('AI_CHATBOT_COUPON_TITLE'),
+            'AI_CHATBOT_COUPON_MESSAGE' => Configuration::get('AI_CHATBOT_COUPON_MESSAGE'),
         ]);
         
         return $this->display(__FILE__, 'views/templates/admin/configure.tpl');
@@ -208,6 +268,278 @@ class Ai_Chatbot extends Module
             @file_put_contents(_PS_ROOT_DIR_ . '/var/logs/ai_chatbot.log', 
                 '[' . date('Y-m-d H:i:s') . '] Vector store setup failed: ' . $e->getMessage() . "\n", 
                 FILE_APPEND);
+        }
+    }
+
+    private function updateCouponSettings()
+    {
+        Configuration::updateValue('AI_CHATBOT_COUPON_ENABLED', (bool)Tools::getValue('AI_CHATBOT_COUPON_ENABLED', false));
+        Configuration::updateValue('AI_CHATBOT_COUPON_AMOUNT', (int)Tools::getValue('AI_CHATBOT_COUPON_AMOUNT', 10));
+        Configuration::updateValue('AI_CHATBOT_COUPON_TYPE', Tools::getValue('AI_CHATBOT_COUPON_TYPE', 'percentage'));
+        Configuration::updateValue('AI_CHATBOT_COUPON_EXPIRY_DAYS', (int)Tools::getValue('AI_CHATBOT_COUPON_EXPIRY_DAYS', 7));
+        Configuration::updateValue('AI_CHATBOT_POPUP_FREQUENCY', Tools::getValue('AI_CHATBOT_POPUP_FREQUENCY', 'once_per_day'));
+        Configuration::updateValue('AI_CHATBOT_COUPON_MIN_CART', (float)Tools::getValue('AI_CHATBOT_COUPON_MIN_CART', 0));
+        Configuration::updateValue('AI_CHATBOT_POPUP_DELAY', (int)Tools::getValue('AI_CHATBOT_POPUP_DELAY', 3));
+        Configuration::updateValue('AI_CHATBOT_COUPON_TITLE', Tools::getValue('AI_CHATBOT_COUPON_TITLE', 'Special Offer Just For You!'));
+        Configuration::updateValue('AI_CHATBOT_COUPON_MESSAGE', Tools::getValue('AI_CHATBOT_COUPON_MESSAGE', 'Get your exclusive discount code and save on your purchase!'));
+    }
+
+    /**
+     * Generate a unique coupon code for a visitor
+     * @return array|null Array with coupon info or null on failure
+     */
+    public function generateCoupon()
+    {
+        if (!Configuration::get('AI_CHATBOT_COUPON_ENABLED')) {
+            return null;
+        }
+
+        try {
+            $couponCode = $this->generateUniqueCouponCode();
+            $amount = (float)Configuration::get('AI_CHATBOT_COUPON_AMOUNT');
+            $type = Configuration::get('AI_CHATBOT_COUPON_TYPE');
+            $expiryDays = (int)Configuration::get('AI_CHATBOT_COUPON_EXPIRY_DAYS');
+            $minCart = (float)Configuration::get('AI_CHATBOT_COUPON_MIN_CART');
+            $title = Configuration::get('AI_CHATBOT_COUPON_TITLE');
+            $message = Configuration::get('AI_CHATBOT_COUPON_MESSAGE');
+            
+            // Create CartRule (PrestaShop's coupon system)
+            $cartRule = new CartRule();
+            $cartRule->code = $couponCode;
+            $cartRule->name = [
+                (int)Configuration::get('PS_LANG_DEFAULT') => 'AI Chatbot Coupon: ' . $couponCode
+            ];
+            $cartRule->description = 'Generated by AI Chatbot module';
+            
+            // Set reduction
+            if ($type === 'percentage') {
+                $cartRule->reduction_percent = $amount;
+                $cartRule->reduction_amount = 0;
+            } else {
+                $cartRule->reduction_amount = $amount;
+                $cartRule->reduction_percent = 0;
+                $cartRule->reduction_tax = 1; // Include tax
+            }
+            
+            // Set minimum amount
+            if ($minCart > 0) {
+                $cartRule->minimum_amount = $minCart;
+                $cartRule->minimum_amount_tax = 1;
+                $cartRule->minimum_amount_currency = (int)Configuration::get('PS_CURRENCY_DEFAULT');
+            }
+            
+            // Set dates
+            $cartRule->date_from = date('Y-m-d H:i:s');
+            $cartRule->date_to = date('Y-m-d H:i:s', strtotime('+' . $expiryDays . ' days'));
+            
+            // Set usage limits
+            $cartRule->quantity = 1; // Single use
+            $cartRule->quantity_per_user = 1;
+            
+            // Enable the rule
+            $cartRule->active = 1;
+            
+            if ($cartRule->add()) {
+                // Track this coupon
+                $this->trackCouponGeneration($couponCode, $cartRule->id);
+                
+                return [
+                    'code' => $couponCode,
+                    'amount' => $amount,
+                    'type' => $type,
+                    'title' => $title,
+                    'message' => $message,
+                    'min_cart' => $minCart,
+                    'expires' => date('Y-m-d', strtotime('+' . $expiryDays . ' days'))
+                ];
+            }
+            
+        } catch (Exception $e) {
+            error_log('AI Chatbot Coupon Generation Error: ' . $e->getMessage());
+        }
+        
+        return null;
+    }
+
+    /**
+     * Generate a unique coupon code
+     * @return string
+     */
+    private function generateUniqueCouponCode()
+    {
+        do {
+            $code = 'AICHAT' . strtoupper(Tools::substr(md5(uniqid()), 0, 8));
+            $exists = Db::getInstance()->getValue('SELECT id_cart_rule FROM ' . _DB_PREFIX_ . 'cart_rule WHERE code = "' . pSQL($code) . '"');
+        } while ($exists);
+        
+        return $code;
+    }
+
+    /**
+     * Track coupon generation for analytics
+     * @param string $couponCode
+     * @param int $cartRuleId
+     */
+    private function trackCouponGeneration($couponCode, $cartRuleId)
+    {
+        $customerId = null;
+        $sessionId = null;
+        
+        if (Context::getContext()->customer && Context::getContext()->customer->id) {
+            $customerId = (int)Context::getContext()->customer->id;
+        }
+        
+        if (session_status() === PHP_SESSION_ACTIVE) {
+            $sessionId = session_id();
+        }
+        
+        try {
+            Db::getInstance()->insert('ai_chatbot_coupon_tracking', [
+                'id_customer' => $customerId,
+                'ip_address' => Tools::getRemoteAddr(),
+                'session_id' => pSQL($sessionId),
+                'coupon_code' => pSQL($couponCode),
+                'id_cart_rule' => (int)$cartRuleId,
+                'popup_shown' => 0,
+                'popup_closed' => 0,
+                'coupon_used' => 0,
+                'date_add' => date('Y-m-d H:i:s'),
+                'date_upd' => date('Y-m-d H:i:s')
+            ]);
+        } catch (Exception $e) {
+            error_log('AI Chatbot Coupon Tracking Error: ' . $e->getMessage());
+        }
+    }
+
+    /**
+     * Check if visitor should see popup based on frequency settings
+     * @return bool
+     */
+    public function shouldShowPopup()
+    {
+        if (!Configuration::get('AI_CHATBOT_COUPON_ENABLED')) {
+            return false;
+        }
+        
+        $frequency = Configuration::get('AI_CHATBOT_POPUP_FREQUENCY');
+        $customerId = null;
+        $ipAddress = Tools::getRemoteAddr();
+        $sessionId = session_status() === PHP_SESSION_ACTIVE ? session_id() : null;
+        
+        if (Context::getContext()->customer && Context::getContext()->customer->id) {
+            $customerId = (int)Context::getContext()->customer->id;
+        }
+        
+        try {
+            switch ($frequency) {
+                case 'always':
+                    return true;
+                    
+                case 'once_per_session':
+                    if (!$sessionId) return false;
+                    $count = (int)Db::getInstance()->getValue(
+                        'SELECT COUNT(*) FROM ' . _DB_PREFIX_ . 'ai_chatbot_popup_frequency 
+                         WHERE session_id = "' . pSQL($sessionId) . '"'
+                    );
+                    return $count == 0;
+                    
+                case 'once_per_day':
+                    $condition = $customerId ? 
+                        'id_customer = ' . $customerId : 
+                        'ip_address = "' . pSQL($ipAddress) . '" AND id_customer IS NULL';
+                    
+                    $lastShown = Db::getInstance()->getValue(
+                        'SELECT last_popup_shown FROM ' . _DB_PREFIX_ . 'ai_chatbot_popup_frequency 
+                         WHERE ' . $condition . ' ORDER BY date_upd DESC LIMIT 1'
+                    );
+                    
+                    if (!$lastShown) return true;
+                    return strtotime($lastShown) < strtotime('-24 hours');
+                    
+                case 'once_per_week':
+                    $condition = $customerId ? 
+                        'id_customer = ' . $customerId : 
+                        'ip_address = "' . pSQL($ipAddress) . '" AND id_customer IS NULL';
+                    
+                    $lastShown = Db::getInstance()->getValue(
+                        'SELECT last_popup_shown FROM ' . _DB_PREFIX_ . 'ai_chatbot_popup_frequency 
+                         WHERE ' . $condition . ' ORDER BY date_upd DESC LIMIT 1'
+                    );
+                    
+                    if (!$lastShown) return true;
+                    return strtotime($lastShown) < strtotime('-7 days');
+                    
+                case 'once_per_visitor':
+                    $condition = $customerId ? 
+                        'id_customer = ' . $customerId : 
+                        'ip_address = "' . pSQL($ipAddress) . '" AND id_customer IS NULL';
+                    
+                    $count = (int)Db::getInstance()->getValue(
+                        'SELECT COUNT(*) FROM ' . _DB_PREFIX_ . 'ai_chatbot_popup_frequency 
+                         WHERE ' . $condition
+                    );
+                    return $count == 0;
+                    
+                default:
+                    return false;
+            }
+        } catch (Exception $e) {
+            error_log('AI Chatbot Popup Frequency Check Error: ' . $e->getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * Record that popup was shown to visitor
+     */
+    public function recordPopupShown()
+    {
+        $customerId = null;
+        $ipAddress = Tools::getRemoteAddr();
+        $sessionId = session_status() === PHP_SESSION_ACTIVE ? session_id() : null;
+        
+        if (Context::getContext()->customer && Context::getContext()->customer->id) {
+            $customerId = (int)Context::getContext()->customer->id;
+        }
+        
+        try {
+            $data = [
+                'id_customer' => $customerId,
+                'ip_address' => pSQL($ipAddress),
+                'session_id' => pSQL($sessionId),
+                'last_popup_shown' => date('Y-m-d H:i:s'),
+                'popup_count' => 1,
+                'date_add' => date('Y-m-d H:i:s'),
+                'date_upd' => date('Y-m-d H:i:s')
+            ];
+            
+            // Check if record exists
+            $condition = $customerId ? 
+                'id_customer = ' . $customerId : 
+                'ip_address = "' . pSQL($ipAddress) . '" AND id_customer IS NULL';
+            
+            $existingId = Db::getInstance()->getValue(
+                'SELECT id FROM ' . _DB_PREFIX_ . 'ai_chatbot_popup_frequency 
+                 WHERE ' . $condition . ' ORDER BY date_upd DESC LIMIT 1'
+            );
+            
+            if ($existingId) {
+                // Update existing record
+                Db::getInstance()->update(
+                    'ai_chatbot_popup_frequency',
+                    [
+                        'last_popup_shown' => date('Y-m-d H:i:s'),
+                        'popup_count' => 'popup_count + 1',
+                        'date_upd' => date('Y-m-d H:i:s')
+                    ],
+                    'id = ' . (int)$existingId
+                );
+            } else {
+                // Insert new record
+                Db::getInstance()->insert('ai_chatbot_popup_frequency', $data);
+            }
+        } catch (Exception $e) {
+            error_log('AI Chatbot Popup Recording Error: ' . $e->getMessage());
         }
     }
 }

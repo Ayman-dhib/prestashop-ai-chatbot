@@ -3,7 +3,8 @@
 <div id="ai-chat-root"
      class="ai-chat"
      data-v="tpl-2025-09-03-a"
-     data-api="{$link->getModuleLink('ai_chatbot','api')|escape:'htmlall'}">
+     data-api="{$link->getModuleLink('ai_chatbot','api')|escape:'htmlall'}"
+     data-coupon-api="{$link->getModuleLink('ai_chatbot','api')|escape:'htmlall'}?coupon=1">
   <button id="ai-chat-bubble" class="ai-bubble" aria-label="Chat" aria-expanded="false">
     <span class="ai-bubble-dot"></span>
     <span class="ai-bubble-dot"></span>
@@ -28,6 +29,31 @@
       <button class="ai-send" type="submit" title="{l s='Send' mod='ai_chatbot'}">➤</button>
     </form>
   </section>
+</div>
+
+<!-- Coupon Popup -->
+<div id="ai-coupon-popup" class="ai-coupon-popup" style="display: none;">
+  <div class="ai-coupon-overlay"></div>
+  <div class="ai-coupon-modal">
+    <div class="ai-coupon-close" onclick="closeCouponPopup()">&times;</div>
+    <div class="ai-coupon-content">
+      <div class="ai-coupon-icon">🎉</div>
+      <h3 id="ai-coupon-title">Special Offer Just For You!</h3>
+      <p id="ai-coupon-message">Get your exclusive discount code and save on your purchase!</p>
+      <div class="ai-coupon-code-container">
+        <div class="ai-coupon-code" id="ai-coupon-code">LOADING...</div>
+        <button class="ai-coupon-copy" onclick="copyCouponCode()" title="Copy to clipboard">📋</button>
+      </div>
+      <div class="ai-coupon-details" id="ai-coupon-details">
+        <p>Expires: <span id="ai-coupon-expires">-</span></p>
+        <p class="ai-coupon-min-cart" id="ai-coupon-min-cart" style="display: none;">Minimum order: <span></span></p>
+      </div>
+      <div class="ai-coupon-actions">
+        <button class="ai-coupon-shop-now" onclick="startShopping()">Shop Now</button>
+        <button class="ai-coupon-chat" onclick="openChatWithCoupon()">Ask Assistant</button>
+      </div>
+    </div>
+  </div>
 </div>
 
 <style>
@@ -61,6 +87,41 @@
   .ai-input:focus{ldelim}border-color:#7d8dff{rdelim}
   .ai-send{ldelim}background:#7b88ff;color:#0a0e1a;border:none;border-radius:12px;padding:0 14px;font-weight:700;cursor:pointer{rdelim}
   .ai-send:active{ldelim}transform:translateY(1px){rdelim}
+  
+  /* Coupon Popup Styles */
+  .ai-coupon-popup{ldelim}position:fixed;top:0;left:0;width:100%;height:100%;z-index:2147483001;display:flex;justify-content:center;align-items:center;font-family:Inter,system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif;transition:opacity 0.2s ease{rdelim}
+  .ai-coupon-overlay{ldelim}position:absolute;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);backdrop-filter:blur(5px){rdelim}
+  .ai-coupon-modal{ldelim}position:relative;background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);border-radius:20px;box-shadow:0 25px 50px rgba(0,0,0,0.25);max-width:400px;width:calc(100% - 40px);margin:20px;animation:ai-popup-slide 0.3s ease-out{rdelim}
+  .ai-coupon-close{ldelim}position:absolute;top:10px;right:15px;color:white;font-size:24px;cursor:pointer;line-height:1;z-index:10;opacity:0.9;transition:all 0.2s;width:30px;height:30px;display:flex;align-items:center;justify-content:center;border-radius:50%;background:rgba(0,0,0,0.2){rdelim}
+  .ai-coupon-close:hover{ldelim}opacity:1;transform:scale(1.1);background:rgba(0,0,0,0.4){rdelim}
+  .ai-coupon-content{ldelim}padding:40px 30px 30px;text-align:center;color:white{rdelim}
+  .ai-coupon-icon{ldelim}font-size:48px;margin-bottom:15px;animation:ai-bounce 2s infinite{rdelim}
+  .ai-coupon-content h3{ldelim}margin:0 0 15px;font-size:24px;font-weight:700;text-shadow:0 2px 4px rgba(0,0,0,0.3){rdelim}
+  .ai-coupon-content p{ldelim}margin:0 0 25px;font-size:16px;color:white;opacity:1;line-height:1.4{rdelim}
+  .ai-coupon-code-container{ldelim}display:flex;align-items:center;justify-content:center;gap:10px;margin:25px 0;padding:15px;background:rgba(255,255,255,0.15);border-radius:12px;backdrop-filter:blur(10px){rdelim}
+  .ai-coupon-code{ldelim}font-family:Monaco,Consolas,monospace;font-size:18px;font-weight:bold;color:white;letter-spacing:1px;user-select:all{rdelim}
+  .ai-coupon-copy{ldelim}background:rgba(255,255,255,0.2);border:none;color:white;padding:8px 12px;border-radius:6px;cursor:pointer;font-size:16px;transition:all 0.2s{rdelim}
+  .ai-coupon-copy:hover{ldelim}background:rgba(255,255,255,0.3);transform:scale(1.05){rdelim}
+  .ai-coupon-details{ldelim}margin:20px 0;font-size:14px;opacity:0.8{rdelim}
+  .ai-coupon-details p{ldelim}margin:5px 0;font-size:14px{rdelim}
+  .ai-coupon-actions{ldelim}display:flex;gap:12px;margin-top:25px{rdelim}
+  .ai-coupon-actions button{ldelim}flex:1;padding:12px 20px;border:none;border-radius:25px;font-weight:600;cursor:pointer;font-size:14px;transition:all 0.2s{rdelim}
+  .ai-coupon-shop-now{ldelim}background:white;color:#667eea;box-shadow:0 4px 15px rgba(255,255,255,0.2){rdelim}
+  .ai-coupon-shop-now:hover{ldelim}transform:translateY(-2px);box-shadow:0 6px 20px rgba(255,255,255,0.3){rdelim}
+  .ai-coupon-chat{ldelim}background:rgba(255,255,255,0.2);color:white;border:2px solid rgba(255,255,255,0.3){rdelim}
+  .ai-coupon-chat:hover{ldelim}background:rgba(255,255,255,0.3);transform:translateY(-2px){rdelim}
+  
+  @keyframes ai-popup-slide{ldelim}from{ldelim}opacity:0;transform:scale(0.8) translateY(20px){rdelim}to{ldelim}opacity:1;transform:scale(1) translateY(0){rdelim}{rdelim}
+  @keyframes ai-bounce{ldelim}0%,20%,50%,80%,100%{ldelim}transform:translateY(0){rdelim}40%{ldelim}transform:translateY(-10px){rdelim}60%{ldelim}transform:translateY(-5px){rdelim}{rdelim}
+  
+  /* Mobile responsive */
+  @media (max-width: 480px) {
+    .ai-coupon-modal{ldelim}margin:10px;border-radius:15px{rdelim}
+    .ai-coupon-content{ldelim}padding:30px 20px 20px{rdelim}
+    .ai-coupon-content h3{ldelim}font-size:20px{rdelim}
+    .ai-coupon-code{ldelim}font-size:16px{rdelim}
+    .ai-coupon-actions{ldelim}flex-direction:column{rdelim}
+  }
 </style>
 
 {literal}
@@ -335,6 +396,9 @@
 
   // ---- reset chat history on every page load silently
   resetSession(true);
+  
+  // ---- initialize coupon popup functionality
+  initCouponPopup();
 
   // ---- handle browser bfcache (user navigates back)
   window.addEventListener('pageshow', (ev)=>{
@@ -344,6 +408,230 @@
       resetSession(true);
     }
   });
+  
+  /* ============ COUPON POPUP FUNCTIONALITY ============ */
+  
+  function initCouponPopup() {
+    // Check if coupon should be shown on page load
+    checkAndShowCoupon();
+    
+    // Close popup when clicking overlay or modal background
+    const popup = document.getElementById('ai-coupon-popup');
+    if (popup) {
+      popup.addEventListener('click', function(event) {
+        // Close if clicking the popup background (not the modal content)
+        if (event.target === popup || event.target.classList.contains('ai-coupon-overlay')) {
+          closeCouponPopup();
+        }
+      });
+    }
+  }
+  
+  async function checkAndShowCoupon() {
+    try {
+      const couponApiUrl = root.getAttribute('data-coupon-api');
+      if (!couponApiUrl) return;
+      
+      // Check if popup should be shown and get coupon data
+      const response = await fetch(couponApiUrl, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'check_popup' })
+      });
+      
+      const data = await response.json();
+      
+      if (data.show_popup && data.coupon) {
+        // Show popup with delay
+        const delay = (data.delay || 3) * 1000;
+        setTimeout(() => {
+          showCouponPopup(data.coupon);
+        }, delay);
+      }
+    } catch (error) {
+      console.warn('Coupon popup check failed:', error);
+    }
+  }
+  
+  function showCouponPopup(couponData) {
+    const popup = document.getElementById('ai-coupon-popup');
+    if (!popup) return;
+    
+    // Update popup content
+    const title = document.getElementById('ai-coupon-title');
+    const message = document.getElementById('ai-coupon-message');
+    const code = document.getElementById('ai-coupon-code');
+    const expires = document.getElementById('ai-coupon-expires');
+    const minCart = document.getElementById('ai-coupon-min-cart');
+    
+    if (title) title.textContent = couponData.title || 'Special Offer!';
+    if (message) message.textContent = couponData.message || 'Get your discount!';
+    if (code) code.textContent = couponData.code || '';
+    if (expires) expires.textContent = couponData.expires || '';
+    
+    // Show minimum cart amount if set
+    if (minCart && couponData.min_cart > 0) {
+      minCart.style.display = 'block';
+      minCart.querySelector('span').textContent = couponData.min_cart;
+    }
+    
+    // Store coupon data globally
+    window.aiChatbotCoupon = couponData;
+    
+    // Show popup with animation
+    popup.style.display = 'flex';
+    
+    // Record that popup was shown
+    recordPopupShown();
+  }
+  
+  window.closeCouponPopup = function() {
+    const popup = document.getElementById('ai-coupon-popup');
+    if (popup) {
+      // Add fade out animation
+      popup.style.opacity = '0';
+      setTimeout(() => {
+        popup.style.display = 'none';
+        popup.style.opacity = '1'; // Reset for next time
+      }, 200);
+    }
+  };
+  
+  window.copyCouponCode = function() {
+    const codeElement = document.getElementById('ai-coupon-code');
+    if (!codeElement) return;
+    
+    const code = codeElement.textContent;
+    
+    // Try to copy to clipboard
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(code).then(() => {
+        showCopySuccess();
+      }).catch(() => {
+        fallbackCopyToClipboard(code);
+      });
+    } else {
+      fallbackCopyToClipboard(code);
+    }
+  };
+  
+  function fallbackCopyToClipboard(text) {
+    const textArea = document.createElement('textarea');
+    textArea.value = text;
+    textArea.style.position = 'fixed';
+    textArea.style.left = '-999999px';
+    document.body.appendChild(textArea);
+    textArea.focus();
+    textArea.select();
+    
+    try {
+      document.execCommand('copy');
+      showCopySuccess();
+    } catch (err) {
+      console.warn('Copy failed:', err);
+      // Show manual copy instruction
+      alert('Copy this code: ' + text);
+    } finally {
+      document.body.removeChild(textArea);
+    }
+  }
+  
+  function showCopySuccess() {
+    const copyBtn = document.querySelector('.ai-coupon-copy');
+    if (copyBtn) {
+      const originalText = copyBtn.textContent;
+      copyBtn.textContent = '✓';
+      copyBtn.style.background = 'rgba(76, 175, 80, 0.8)';
+      
+      setTimeout(() => {
+        copyBtn.textContent = originalText;
+        copyBtn.style.background = '';
+      }, 2000);
+    }
+  }
+  
+  window.startShopping = function() {
+    closeCouponPopup();
+    
+    // Try to find shop/category links, fallback to common shop URLs
+    const possibleShopUrls = [
+      document.querySelector('a[href*="category"]'),
+      document.querySelector('a[href*="shop"]'),
+      document.querySelector('a[href*="products"]'),
+      document.querySelector('.category a'),
+      document.querySelector('[data-depth="0"] a'), // PrestaShop category menu
+      document.querySelector('#category a')
+    ];
+    
+    let shopUrl = null;
+    for (const link of possibleShopUrls) {
+      if (link && link.href) {
+        shopUrl = link.href;
+        break;
+      }
+    }
+    
+    if (shopUrl) {
+      window.location.href = shopUrl;
+    } else {
+      // Try common PrestaShop shop URLs
+      const baseUrl = window.location.origin;
+      const shopPaths = ['/2-home', '/shop', '/products', '/categories'];
+      
+      // Test if any of these paths exist
+      window.location.href = baseUrl + shopPaths[0]; // Default to home category
+    }
+  };
+  
+  window.openChatWithCoupon = function() {
+    closeCouponPopup();
+    
+    // Open chat panel
+    if (panel && panel.hidden) {
+      open();
+    }
+    
+    // Send coupon info to chat after a short delay to ensure panel is open
+    if (window.aiChatbotCoupon && input) {
+      const couponMsg = `I have a coupon code: ${window.aiChatbotCoupon.code}. How can I use it?`;
+      setTimeout(() => {
+        input.value = couponMsg;
+        input.focus();
+        // Auto-submit the message
+        if (form && typeof send === 'function') {
+          send(couponMsg);
+        }
+      }, 700);
+    }
+  };
+  
+  // Add keyboard escape functionality
+  document.addEventListener('keydown', function(event) {
+    if (event.key === 'Escape') {
+      const popup = document.getElementById('ai-coupon-popup');
+      if (popup && popup.style.display === 'flex') {
+        closeCouponPopup();
+      }
+    }
+  });
+  
+  async function recordPopupShown() {
+    try {
+      const couponApiUrl = root.getAttribute('data-coupon-api');
+      if (!couponApiUrl) return;
+      
+      await fetch(couponApiUrl, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'record_popup_shown' })
+      });
+    } catch (error) {
+      console.warn('Failed to record popup shown:', error);
+    }
+  }
+  
 })();
 </script>
 {/literal}
