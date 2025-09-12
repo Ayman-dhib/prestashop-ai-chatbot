@@ -454,11 +454,25 @@ class Ai_ChatbotApiModuleFrontController extends ModuleFrontController
                     return $this->getLocalizedMessage('order_email_required', $lang);
                 }
                 
-                $_SESSION[self::S_FLOW]['email'] = $typedEmail;
-                
-                // Always capture email (subscriber or not)
+                // Save the email to emailsubscription table
                 $this->captureEmailForCollection($typedEmail);
                 
+                // Check if user is logged in and if the provided email matches
+                if (!$isLoggedIn) {
+                    unset($_SESSION[self::S_FLOW]);
+                    if ($lang === 'fr') {
+                        return "Désolé, vous devez être connecté pour consulter le statut de votre commande. Veuillez vous connecter et réessayer.";
+                    } else {
+                        return "Sorry, you need to be logged in to check your order status. Please log in and try again.";
+                    }
+                }
+                
+                if ($loggedEmail !== strtolower($typedEmail)) {
+                    unset($_SESSION[self::S_FLOW]);
+                    return $this->getLocalizedMessage('order_security_error', $lang);
+                }
+                
+                $_SESSION[self::S_FLOW]['email'] = $typedEmail;
                 $_SESSION[self::S_FLOW]['stage'] = 'need_id';
                 return $this->getLocalizedMessage('order_need_id', $lang);
                 
@@ -767,31 +781,178 @@ class Ai_ChatbotApiModuleFrontController extends ModuleFrontController
     private function extractFiltersFromMessage(array $tokens, int $idLang): array
     {
         $db = Db::getInstance();
+        $result = ['brands' => [], 'attrs' => []];
+        
+        // Check which filters are enabled in configuration
+        $colorEnabled = Configuration::get('AI_CHATBOT_FILTER_COLOR');
+        $brandEnabled = Configuration::get('AI_CHATBOT_FILTER_BRAND');
+        $sizeEnabled = Configuration::get('AI_CHATBOT_FILTER_SIZE');
+        
+        $this->log('FILTER EXTRACTION: Enabled filters - Color: ' . ($colorEnabled ? 'Yes' : 'No') . ', Brand: ' . ($brandEnabled ? 'Yes' : 'No') . ', Size: ' . ($sizeEnabled ? 'Yes' : 'No'));
+        
+        if (!$tokens) {
+            return $result;
+        }
 
-        // BRANDS
-        $brandIds = [];
-        if ($tokens) {
+        // BRANDS - only extract if brand filter is enabled
+        if ($brandEnabled) {
             $like = implode(' OR ', array_map(function($t){ return "m.name LIKE '".pSQL('%'.$t.'%')."'"; }, $tokens));
             $rows = $db->executeS('SELECT id_manufacturer FROM '._DB_PREFIX_.'manufacturer m WHERE ('.$like.') LIMIT 16') ?: [];
-            foreach ($rows as $r) $brandIds[] = (int)$r['id_manufacturer'];
+            foreach ($rows as $r) {
+                $result['brands'][] = (int)$r['id_manufacturer'];
+            }
+            $this->log('FILTER EXTRACTION: Found ' . count($result['brands']) . ' matching brands');
         }
 
-        // ATTRIBUTES (match across all languages to handle FR/EN tokens)
-        $attrIds = [];
-        if ($tokens) {
+        // ATTRIBUTES (colors and sizes) - only extract if respective filters are enabled
+        if ($colorEnabled || $sizeEnabled) {
             $like = implode(' OR ', array_map(function($t){ return "al.name LIKE '".pSQL('%'.$t.'%')."'"; }, $tokens));
-            $rows = $db->executeS('SELECT DISTINCT a.id_attribute
-                      FROM '._DB_PREFIX_.'attribute a
-                      INNER JOIN '._DB_PREFIX_.'attribute_lang al ON al.id_attribute=a.id_attribute
-                      WHERE ('.$like.')
-                      LIMIT 64') ?: [];
-            foreach ($rows as $r) $attrIds[] = (int)$r['id_attribute'];
+            $attrRows = $db->executeS('SELECT DISTINCT a.id_attribute, ag.id_attribute_group, ag.group_type
+                          FROM '._DB_PREFIX_.'attribute a
+                          INNER JOIN '._DB_PREFIX_.'attribute_lang al ON al.id_attribute=a.id_attribute
+                          INNER JOIN '._DB_PREFIX_.'attribute_group ag ON ag.id_attribute_group=a.id_attribute_group
+                          WHERE ('.$like.')
+                          LIMIT 64') ?: [];
+            
+            foreach ($attrRows as $r) {
+                $attrId = (int)$r['id_attribute'];
+                $groupType = $r['group_type'] ?? '';
+                
+                // Determine if this attribute is for color or size based on group type or common patterns
+                $isColorAttr = $this->isColorAttribute($attrId, $groupType);
+                $isSizeAttr = $this->isSizeAttribute($attrId, $groupType);
+                
+                // Only add if the corresponding filter is enabled
+                if (($isColorAttr && $colorEnabled) || ($isSizeAttr && $sizeEnabled) || 
+                    (!$isColorAttr && !$isSizeAttr && ($colorEnabled || $sizeEnabled))) {
+                    $result['attrs'][] = $attrId;
+                }
+            }
+            $this->log('FILTER EXTRACTION: Found ' . count($result['attrs']) . ' matching attributes');
         }
 
-        return [
-            'brands' => array_values(array_unique($brandIds)),
-            'attrs'  => array_values(array_unique($attrIds)),
-        ];
+        $result['brands'] = array_values(array_unique($result['brands']));
+        $result['attrs'] = array_values(array_unique($result['attrs']));
+        
+        return $result;
+    }
+    
+    /**
+     * Determine if an attribute is related to color
+     */
+    private function isColorAttribute(int $attrId, string $groupType): bool
+    {
+        // Check by group type first
+        if ($groupType === 'color') {
+            return true;
+        }
+        
+        // Fallback: Check attribute name patterns
+        try {
+            $sql = 'SELECT al.name FROM '._DB_PREFIX_.'attribute_lang al WHERE al.id_attribute = '.(int)$attrId.' LIMIT 1';
+            $attrName = Db::getInstance()->getValue($sql);
+            if ($attrName) {
+                $lowerName = mb_strtolower($attrName, 'UTF-8');
+                // Common color names
+                $colorPatterns = ['red', 'blue', 'green', 'black', 'white', 'yellow', 'orange', 'purple', 'pink', 'brown', 'gray', 'grey',
+                                 'rouge', 'bleu', 'vert', 'noir', 'blanc', 'jaune', 'orange', 'violet', 'rose', 'marron', 'gris'];
+                
+                foreach ($colorPatterns as $color) {
+                    if (strpos($lowerName, $color) !== false) {
+                        return true;
+                    }
+                }
+            }
+        } catch (\Throwable $e) {
+            $this->log('COLOR ATTR CHECK ERR: '.$e->getMessage());
+        }
+        
+        return false;
+    }
+    
+    /**
+     * Determine if an attribute is related to size
+     */
+    private function isSizeAttribute(int $attrId, string $groupType): bool
+    {
+        // Check by group type first
+        if (in_array($groupType, ['select', 'radio']) || strpos($groupType, 'size') !== false) {
+            // Additional check needed since these types can be for various attributes
+        }
+        
+        // Check attribute name patterns
+        try {
+            $sql = 'SELECT al.name FROM '._DB_PREFIX_.'attribute_lang al WHERE al.id_attribute = '.(int)$attrId.' LIMIT 1';
+            $attrName = Db::getInstance()->getValue($sql);
+            if ($attrName) {
+                $lowerName = mb_strtolower($attrName, 'UTF-8');
+                // Common size patterns
+                $sizePatterns = ['/^(xs|s|m|l|xl|xxl)$/i', '/^\d+$/', '/^(small|medium|large)/i', '/^(petit|moyen|grand)/i',
+                                '/^(36|37|38|39|40|41|42|43|44|45|46)$/', '/taille/i', '/size/i'];
+                
+                foreach ($sizePatterns as $pattern) {
+                    if (preg_match($pattern, $lowerName)) {
+                        return true;
+                    }
+                }
+            }
+        } catch (\Throwable $e) {
+            $this->log('SIZE ATTR CHECK ERR: '.$e->getMessage());
+        }
+        
+        return false;
+    }
+    
+    /**
+     * Check if user mentioned filters that are not enabled in configuration
+     */
+    private function checkForDisabledFilters(string $message, bool $colorEnabled, bool $brandEnabled, bool $sizeEnabled): bool
+    {
+        $lowerMessage = mb_strtolower($message, 'UTF-8');
+        
+        // Check for brand-related terms if brand filter is disabled
+        if (!$brandEnabled) {
+            $brandTerms = ['nike', 'adidas', 'apple', 'samsung', 'sony', 'hp', 'dell', 'asus', 'canon', 'nikon', 
+                          'zara', 'h&m', 'uniqlo', 'levi', 'gucci', 'prada', 'louis vuitton', 'chanel',
+                          'brand', 'marque', 'designer', 'créateur', 'maker', 'fabricant'];
+            
+            foreach ($brandTerms as $term) {
+                if (strpos($lowerMessage, $term) !== false) {
+                    $this->log('DISABLED FILTER CHECK: Found brand term "'.$term.'" but brand filter is disabled');
+                    return true;
+                }
+            }
+        }
+        
+        // Check for color-related terms if color filter is disabled
+        if (!$colorEnabled) {
+            $colorTerms = ['red', 'blue', 'green', 'black', 'white', 'yellow', 'orange', 'purple', 'pink', 'brown', 'gray', 'grey',
+                          'rouge', 'bleu', 'vert', 'noir', 'blanc', 'jaune', 'orange', 'violet', 'rose', 'marron', 'gris',
+                          'color', 'colour', 'couleur', 'colored', 'coloré'];
+            
+            foreach ($colorTerms as $term) {
+                if (strpos($lowerMessage, $term) !== false) {
+                    $this->log('DISABLED FILTER CHECK: Found color term "'.$term.'" but color filter is disabled');
+                    return true;
+                }
+            }
+        }
+        
+        // Check for size-related terms if size filter is disabled
+        if (!$sizeEnabled) {
+            $sizeTerms = ['xs', 'small', 'medium', 'large', 'xl', 'xxl', 'size', 'taille', 
+                         'petit', 'moyen', 'grand', '36', '37', '38', '39', '40', '41', '42', '43', '44', '45'];
+            
+            foreach ($sizeTerms as $term) {
+                // Use word boundaries for size terms to avoid false positives
+                if (preg_match('/\b'.preg_quote($term, '/').'\b/i', $lowerMessage)) {
+                    $this->log('DISABLED FILTER CHECK: Found size term "'.$term.'" but size filter is disabled');
+                    return true;
+                }
+            }
+        }
+        
+        return false;
     }
 
     private function findProductsInCategories(array $catIds, int $idLang, array $filter, int $limit = 24, array $nameTokens = []): array
@@ -3653,11 +3814,6 @@ Answer:";
             $enabledFilters[] = $lang === 'fr' ? '*taille*' : '*size*';
         }
         
-        // Add "etc." if at least one filter is enabled
-        if (!empty($enabledFilters)) {
-            $enabledFilters[] = $lang === 'fr' ? 'etc.' : 'etc.';
-        }
-        
         $result = implode(', ', $enabledFilters);
         $this->log('ENABLED FILTERS: "' . $result . '"');
         
@@ -3705,6 +3861,11 @@ Answer:";
             
             $this->log('CATALOG FILTERS: Processing message: "'.$message.'" with tokens: '.json_encode($tokens));
             
+            // Check which filters are enabled
+            $colorEnabled = Configuration::get('AI_CHATBOT_FILTER_COLOR');
+            $brandEnabled = Configuration::get('AI_CHATBOT_FILTER_BRAND');
+            $sizeEnabled = Configuration::get('AI_CHATBOT_FILTER_SIZE');
+            
             // Check if user input is relevant to product filtering
             if (!$this->isMessageRelevantToFilters($message)) {
                 $this->log('CATALOG FILTERS: User input not relevant, resetting flow');
@@ -3718,8 +3879,41 @@ Answer:";
                 }
             }
             
+            // Check if user mentioned filters that are not enabled
+            $mentionsDisabledFilter = $this->checkForDisabledFilters($message, $colorEnabled, $brandEnabled, $sizeEnabled);
+            if ($mentionsDisabledFilter) {
+                $enabledFilters = $this->getEnabledFilterOptions($lang);
+                if ($enabledFilters) {
+                    if ($lang === 'fr') {
+                        return "Je ne peux vous aider qu'avec les filtres suivants : {$enabledFilters}. Pourriez-vous me donner des informations sur ces filtres uniquement ?";
+                    } else {
+                        return "I can only help you with these filters: {$enabledFilters}. Could you please provide information about these filters only?";
+                    }
+                } else {
+                    // No filters enabled at all, show products directly
+                    $categoryIds = array_map('intval', (array)($flow['cat_ids'] ?? []));
+                    if ($categoryIds) {
+                        $products = $this->findProductsInCategories($categoryIds, $idLang, ['brands' => [], 'attrs' => []], 24, $tokens);
+                        if ($products) {
+                            return $this->formatProductResults($products, $lang);
+                        }
+                    }
+                    return $lang === 'fr' ? "Aucun produit trouvé dans cette catégorie." : "No products found in this category.";
+                }
+            }
+            
             $filters = $this->extractFiltersFromMessage($tokens, $idLang);
             $this->log('CATALOG FILTERS: Extracted filters: '.json_encode($filters));
+            
+            // Validate that we actually found some relevant filters if any are enabled
+            if (($colorEnabled || $brandEnabled || $sizeEnabled) && empty($filters['brands']) && empty($filters['attrs'])) {
+                $enabledFilters = $this->getEnabledFilterOptions($lang);
+                if ($lang === 'fr') {
+                    return "Je n'ai pas pu identifier vos préférences. Pouvez-vous me préciser : {$enabledFilters} ?";
+                } else {
+                    return "I couldn't identify your preferences. Could you please specify: {$enabledFilters}?";
+                }
+            }
 
             $categoryIds = array_map('intval', (array)($flow['cat_ids'] ?? []));
             if (!$categoryIds) {
@@ -3745,7 +3939,17 @@ Answer:";
                     return "That category is empty right now. Please check back later.";
                 }
                 
-                return $this->catMsg('filters_no_match', $lang);
+                // Suggest enabled filters for better results
+                $enabledFilters = $this->getEnabledFilterOptions($lang);
+                if ($enabledFilters) {
+                    if ($lang === 'fr') {
+                        return "Aucun produit ne correspond à ces critères. Essayez avec d'autres : {$enabledFilters}.";
+                    } else {
+                        return "No products match those criteria. Try with different ones: {$enabledFilters}.";
+                    }
+                } else {
+                    return $this->catMsg('filters_no_match', $lang);
+                }
             }
 
             return $this->formatProductResults($products, $lang);
