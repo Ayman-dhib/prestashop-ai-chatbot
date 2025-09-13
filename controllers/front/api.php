@@ -36,6 +36,12 @@ class Ai_ChatbotApiModuleFrontController extends ModuleFrontController
     private const CHAT_MODEL  = 'gpt-4o-mini'; // More cost-effective
     private const EMBED_MODEL = 'text-embedding-3-small';
     
+    // Dynamic threshold storage (for runtime modification)
+    private static $_KW_THRESHOLD_MIN;
+    private static $_KW_THRESHOLD_MAX;
+    private static $_SEM_THRESHOLD_MIN;
+    private static $_SEM_THRESHOLD_MAX;
+    
     // Rating system timing (in hours)
     private const RATING_MIN_ORDER_AGE = 2; // Wait 2 hours after order
     private const RATING_MAX_ORDER_AGE = 168; // 1 week maximum
@@ -110,6 +116,21 @@ class Ai_ChatbotApiModuleFrontController extends ModuleFrontController
             // Detect user intent using AI-powered detection with fallback
             $intent = $this->detectIntentWithAI($userMsg, $lang, $apiKey);
             $this->log('Detected intent: '.$intent);
+            
+            /* 0) Enhanced FAQ Search with AI assistance - PRIORITIZED FIRST */
+            $faqAnswer = $this->searchFAQUniversal($userMsg, $lang, $apiKey, $kbAbs);
+            if ($faqAnswer) {
+                // Ensure the answer is in the user's language
+                $finalAnswer = $this->ensureAnswerInUserLanguage($faqAnswer, $lang, $apiKey);
+                $this->remember('user', $userMsg);
+                $this->remember('assistant', $finalAnswer);
+                $this->out([
+                    'reply' => $finalAnswer, 
+                    'source' => 'faq',
+                    'conversation' => $_SESSION[self::S_CHAT] ?? []
+                ]); 
+                return;
+            }
             
             /* 1) Small talk handling (only when NOT in an active flow and message is not an email) */
             if ($intent === 'smalltalk' && !$this->isInActiveFlow() && $this->extractEmail($userMsg) === null) {
@@ -229,20 +250,9 @@ class Ai_ChatbotApiModuleFrontController extends ModuleFrontController
                 return;
             }
 
-            /* 5) Enhanced FAQ Search with AI assistance */
-            $faqAnswer = $this->searchFAQUniversal($userMsg, $lang, $apiKey, $kbAbs);
-            if ($faqAnswer) {
-                // Ensure the answer is in the user's language
-                $finalAnswer = $this->ensureAnswerInUserLanguage($faqAnswer, $lang, $apiKey);
-                $this->remember('user', $userMsg);
-                $this->remember('assistant', $finalAnswer);
-                $this->out([
-                    'reply' => $finalAnswer, 
-                    'source' => 'faq',
-                    'conversation' => $_SESSION[self::S_CHAT] ?? []
-                ]); 
-                return;
-            }
+            /* 5) Enhanced FAQ Search with AI assistance - MOVED TO TOP PRIORITY */
+            // This section has been moved to the beginning of the processing flow
+            // to prioritize knowledge base responses
 
             /* 7) Promotion/Sale product queries */
             // Skip promotion handling if this was already handled by coupon handler above
@@ -1406,20 +1416,69 @@ class Ai_ChatbotApiModuleFrontController extends ModuleFrontController
      */
     private function searchFAQUniversal(string $userMsg, string $lang, string $apiKey, string $kbAbs): ?string
     {
-        // First try AI-enhanced FAQ search
+        $this->log('PRIORITIZED FAQ SEARCH: Starting with query "' . substr($userMsg, 0, 50) . '..."');
+        
+        // First try original search methods with lower thresholds for higher match rate
+        $isQuestion = preg_match('/[?\?]$/', trim($userMsg)) || 
+                     preg_match('/^(how|what|where|when|why|who|can|do|does|is|are|will|should)/i', trim($userMsg));
+        
+        // Apply a 20% lower threshold for all FAQ searches to increase match probability
+        $originalKwThresholdMin = self::KW_THRESHOLD_MIN;
+        $originalKwThresholdMax = self::KW_THRESHOLD_MAX;
+        $originalSemThresholdMin = self::SEM_THRESHOLD_MIN;
+        $originalSemThresholdMax = self::SEM_THRESHOLD_MAX;
+        
+        // Temporarily lower thresholds
+        $this->setConstant('_KW_THRESHOLD_MIN', $originalKwThresholdMin * 0.8);
+        $this->setConstant('_KW_THRESHOLD_MAX', $originalKwThresholdMax * 0.8);
+        $this->setConstant('_SEM_THRESHOLD_MIN', $originalSemThresholdMin * 0.8);
+        $this->setConstant('_SEM_THRESHOLD_MAX', $originalSemThresholdMax * 0.8);
+        
+        // Try standard search with lower thresholds
+        $answer = $this->searchFAQ($userMsg, $lang, $apiKey, $kbAbs, $kbAbs . '.embeddings.json');
+        
+        // Restore original thresholds
+        $this->setConstant('_KW_THRESHOLD_MIN', $originalKwThresholdMin);
+        $this->setConstant('_KW_THRESHOLD_MAX', $originalKwThresholdMax);
+        $this->setConstant('_SEM_THRESHOLD_MIN', $originalSemThresholdMin);
+        $this->setConstant('_SEM_THRESHOLD_MAX', $originalSemThresholdMax);
+        
+        if ($answer) {
+            $this->log('PRIORITIZED FAQ SEARCH: Found answer with lower thresholds');
+            return $answer;
+        }
+        
+        // If no match with standard search, try AI-enhanced FAQ search
         if ($apiKey && $kbAbs) {
-            $aiAnswer = $this->getAIEnhancedFAQAnswer($userMsg, $apiKey, $kbAbs);
+            $aiAnswer = $this->getAIEnhancedFAQAnswer($userMsg, $lang, $apiKey, $kbAbs);
             if ($aiAnswer) {
-                $this->log('ENHANCED FAQ SEARCH: AI enhanced answer found');
+                $this->log('PRIORITIZED FAQ SEARCH: AI enhanced answer found');
                 return $aiAnswer;
             }
         }
         
-        // Fallback to original search methods
-        return $this->searchFAQ($userMsg, $lang, $apiKey, $kbAbs, $kbAbs . '.embeddings.json');
+        $this->log('PRIORITIZED FAQ SEARCH: No answer found');
+        return null;
     }
     
-    private function getAIEnhancedFAQAnswer(string $question, string $apiKey, string $kbPath): ?string
+    private function setConstant(string $name, float $value): void
+    {
+        // This is a workaround to modify class constants at runtime
+        $reflection = new ReflectionClass($this);
+        $constants = $reflection->getConstants();
+        if (array_key_exists($name, $constants)) {
+            $reflectionConstant = $reflection->getReflectionConstant($name);
+            if ($reflectionConstant->isPublic()) {
+                // For PHP 8.1+ we could use ReflectionClassConstant::setValue
+                // But for compatibility we use this approach
+                $this->log("Setting constant $name to $value");
+                // Store in a static property as we can't modify constants at runtime
+                self::${'_' . $name} = $value;
+            }
+        }
+    }
+    
+    private function getAIEnhancedFAQAnswer(string $question, string $lang, string $apiKey, string $kbPath): ?string
     {
         try {
             if (!$apiKey) return null;
@@ -4509,7 +4568,8 @@ Answer:";
         // Try embeddings first if available
         if ($apiKey && $embFile && is_file($embFile)) {
             $this->log('FAQ: Trying embeddings search with query: "' . substr($searchQuery, 0, 50) . '..."');
-            $answer = $this->searchFAQWithEmbeddings($searchQuery, $apiKey, $embFile, $isQuestion);
+            // Pass the original language to ensure proper threshold adjustment
+            $answer = $this->searchFAQWithEmbeddings($searchQuery, $apiKey, $embFile, $isQuestion, $originalLang);
         }
         
         // Fallback to text search
@@ -4640,7 +4700,7 @@ Answer:";
         return $score;
     }
     
-    private function searchFAQWithEmbeddings(string $query, string $apiKey, string $embFile, bool $isQuestion = false): ?string
+    private function searchFAQWithEmbeddings(string $query, string $apiKey, string $embFile, bool $isQuestion = false, ?string $lang = null): ?string
     {
         $kb = $this->loadKB($embFile);
         if (!$kb) return null;
@@ -4672,8 +4732,8 @@ Answer:";
         }
         
         // Adaptive threshold based on content quality
-        $kwThreshold = $this->getAdaptiveThreshold('keyword', $keywordScore, $isQuestion);
-        $semThreshold = $this->getAdaptiveThreshold('semantic', $semanticScore, $isQuestion);
+        $kwThreshold = $this->getAdaptiveThreshold('keyword', $keywordScore, $isQuestion, $lang);
+        $semThreshold = $this->getAdaptiveThreshold('semantic', $semanticScore, $isQuestion, $lang);
         
         $this->log('FAQ EMBEDDINGS: thresholds - keyword=' . $kwThreshold . ', semantic=' . $semThreshold);
         
@@ -4692,15 +4752,64 @@ Answer:";
         return null;
     }
     
-    private function getAdaptiveThreshold(string $type, float $score, bool $isQuestion = false): float
+    /**
+     * Get adaptive threshold based on query type and language
+     * 
+     * @param string $type Type of threshold (keyword or semantic)
+     * @param float $score Score value
+     * @param bool $isQuestion Whether the query is a question
+     * @param string $lang Language code (optional, will be detected from context if not provided)
+     * @return float Calculated threshold
+     */
+    private function getAdaptiveThreshold(string $type, float $score, bool $isQuestion = false, ?string $lang = null): float
     {
+        // Detect if we're processing a French query
+        $isFrenchQuery = false;
+        
+        // If language is explicitly provided, use it
+        if ($lang !== null) {
+            $isFrenchQuery = $lang === 'fr';
+        } else {
+            // Try to detect from backtrace for backward compatibility
+            $backtrace = debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS, 3);
+            foreach ($backtrace as $trace) {
+                if (isset($trace['function']) && $trace['function'] === 'searchFAQ') {
+                    $isFrenchQuery = isset($trace['args'][1]) && $trace['args'][1] === 'fr';
+                    break;
+                }
+            }
+            
+            // If still not detected, try to get from session
+            if (!$isFrenchQuery && isset($_SESSION['ai_chat_lang']) && $_SESSION['ai_chat_lang'] === 'fr') {
+                $isFrenchQuery = true;
+            }
+        }
+        
         if ($type === 'keyword') {
+            // Use dynamic thresholds if set, otherwise use constants
+            $minThreshold = isset(self::$_KW_THRESHOLD_MIN) ? self::$_KW_THRESHOLD_MIN : self::KW_THRESHOLD_MIN;
+            $maxThreshold = isset(self::$_KW_THRESHOLD_MAX) ? self::$_KW_THRESHOLD_MAX : self::KW_THRESHOLD_MAX;
+            
             // Lower threshold for better keyword matches, even lower for questions
-            $baseThreshold = $score > 0.08 ? self::KW_THRESHOLD_MIN : self::KW_THRESHOLD_MAX;
+            $baseThreshold = $score > 0.08 ? $minThreshold : $maxThreshold;
+            
+            // Apply additional reduction for French queries (40% lower instead of 30%)
+            if ($isFrenchQuery) {
+                return $isQuestion ? $baseThreshold * 0.6 : $baseThreshold * 0.8; // 40% lower for French questions, 20% for other French
+            }
             return $isQuestion ? $baseThreshold * 0.7 : $baseThreshold; // 30% lower for questions
         } else {
+            // Use dynamic thresholds if set, otherwise use constants
+            $minThreshold = isset(self::$_SEM_THRESHOLD_MIN) ? self::$_SEM_THRESHOLD_MIN : self::SEM_THRESHOLD_MIN;
+            $maxThreshold = isset(self::$_SEM_THRESHOLD_MAX) ? self::$_SEM_THRESHOLD_MAX : self::SEM_THRESHOLD_MAX;
+            
             // Adjust semantic threshold based on score confidence, lower for questions
-            $baseThreshold = $score > 0.6 ? self::SEM_THRESHOLD_MIN : self::SEM_THRESHOLD_MAX;
+            $baseThreshold = $score > 0.6 ? $minThreshold : $maxThreshold;
+            
+            // Apply additional reduction for French queries (30% lower instead of 20%)
+            if ($isFrenchQuery) {
+                return $isQuestion ? $baseThreshold * 0.7 : $baseThreshold * 0.85; // 30% lower for French questions, 15% for other French
+            }
             return $isQuestion ? $baseThreshold * 0.8 : $baseThreshold; // 20% lower for questions
         }
     }
