@@ -36,6 +36,12 @@ class Ai_ChatbotApiModuleFrontController extends ModuleFrontController
     private const CHAT_MODEL  = 'gpt-4o-mini'; // More cost-effective
     private const EMBED_MODEL = 'text-embedding-3-small';
     
+    // Dynamic threshold storage (for runtime modification)
+    private static $_KW_THRESHOLD_MIN;
+    private static $_KW_THRESHOLD_MAX;
+    private static $_SEM_THRESHOLD_MIN;
+    private static $_SEM_THRESHOLD_MAX;
+    
     // Rating system timing (in hours)
     private const RATING_MIN_ORDER_AGE = 2; // Wait 2 hours after order
     private const RATING_MAX_ORDER_AGE = 168; // 1 week maximum
@@ -110,6 +116,21 @@ class Ai_ChatbotApiModuleFrontController extends ModuleFrontController
             // Detect user intent using AI-powered detection with fallback
             $intent = $this->detectIntentWithAI($userMsg, $lang, $apiKey);
             $this->log('Detected intent: '.$intent);
+            
+            /* 0) Enhanced FAQ Search with AI assistance - PRIORITIZED FIRST */
+            $faqAnswer = $this->searchFAQUniversal($userMsg, $lang, $apiKey, $kbAbs);
+            if ($faqAnswer) {
+                // Ensure the answer is in the user's language
+                $finalAnswer = $this->ensureAnswerInUserLanguage($faqAnswer, $lang, $apiKey);
+                $this->remember('user', $userMsg);
+                $this->remember('assistant', $finalAnswer);
+                $this->out([
+                    'reply' => $finalAnswer, 
+                    'source' => 'faq',
+                    'conversation' => $_SESSION[self::S_CHAT] ?? []
+                ]); 
+                return;
+            }
             
             /* 1) Small talk handling (only when NOT in an active flow and message is not an email) */
             if ($intent === 'smalltalk' && !$this->isInActiveFlow() && $this->extractEmail($userMsg) === null) {
@@ -229,20 +250,9 @@ class Ai_ChatbotApiModuleFrontController extends ModuleFrontController
                 return;
             }
 
-            /* 5) Enhanced FAQ Search with AI assistance */
-            $faqAnswer = $this->searchFAQUniversal($userMsg, $lang, $apiKey, $kbAbs);
-            if ($faqAnswer) {
-                // Ensure the answer is in the user's language
-                $finalAnswer = $this->ensureAnswerInUserLanguage($faqAnswer, $lang, $apiKey);
-                $this->remember('user', $userMsg);
-                $this->remember('assistant', $finalAnswer);
-                $this->out([
-                    'reply' => $finalAnswer, 
-                    'source' => 'faq',
-                    'conversation' => $_SESSION[self::S_CHAT] ?? []
-                ]); 
-                return;
-            }
+            /* 5) Enhanced FAQ Search with AI assistance - MOVED TO TOP PRIORITY */
+            // This section has been moved to the beginning of the processing flow
+            // to prioritize knowledge base responses
 
             /* 7) Promotion/Sale product queries */
             // Skip promotion handling if this was already handled by coupon handler above
@@ -286,15 +296,33 @@ class Ai_ChatbotApiModuleFrontController extends ModuleFrontController
     
     private function getOrSetSessionLanguage(string $userMsg): string
     {
-        // Always detect language from current message to allow dynamic switching
+        // Detect language from current message
         $currentLang = $this->detectLanguage($userMsg);
         
-        // Update conversation language to current message language
-        $_SESSION['conversation_language'] = $currentLang;
+        // Check if this is a new conversation or reset
+        $isNewConversation = !isset($_SESSION['conversation_language']) || empty($_SESSION[self::S_CHAT]);
         
-        $this->log("DYNAMIC LANG: Detected '$currentLang' from message: \"" . substr($userMsg, 0, 50) . '..."');
+        // For new conversations, set the language based on detection
+        if ($isNewConversation) {
+            $_SESSION['conversation_language'] = $currentLang;
+            $this->log("LANG INIT: Setting conversation language to '$currentLang' from first message");
+        } else {
+            // For existing conversations, check if we need to update the language
+            // If the message is clearly in a different language (like French greetings or questions)
+            if ($currentLang === 'fr' && preg_match('/\b(bonjour|salut|avez-vous|pourquoi|comment)\b/ui', $userMsg)) {
+                $_SESSION['conversation_language'] = 'fr';
+                $this->log("LANG UPDATE: Switching conversation language to 'fr' based on clear French indicators");
+            } elseif ($currentLang === 'en' && preg_match('/\b(hello|hi|how|why|what|where)\b/ui', $userMsg)) {
+                $_SESSION['conversation_language'] = 'en';
+                $this->log("LANG UPDATE: Switching conversation language to 'en' based on clear English indicators");
+            } else {
+                $this->log("LANG MAINTAIN: Keeping conversation language as '{$_SESSION['conversation_language']}' (detected: $currentLang)");
+            }
+        }
         
-        return $currentLang;
+        $this->log("LANG DETECT: Detected '$currentLang' from message: \"" . substr($userMsg, 0, 50) . '..."');
+        
+        return $_SESSION['conversation_language'];
     }
     
     private function isInActiveFlow(): bool
@@ -347,11 +375,35 @@ class Ai_ChatbotApiModuleFrontController extends ModuleFrontController
 
     /* ====================== SMALL TALK ====================== */
 
+    /**
+     * Enhanced small talk handler with context awareness
+     * Uses conversation history and previous intents for more natural responses
+     */
     private function handleSmallTalk(string $message, string $lang): string
     {
+        // Get conversation context for better responses
+        $conversationSummary = $_SESSION['conversation_summary'] ?? null;
+        $messageCount = $conversationSummary['message_count'] ?? 0;
+        $previousIntent = $_SESSION['detected_intent'] ?? null;
+        $topics = $conversationSummary['topics'] ?? [];
+        
+        $this->log('SMALLTALK: Context - Message count: ' . $messageCount . ', Previous intent: ' . ($previousIntent ?? 'none') . ', Topics: ' . implode(',', $topics));
+        
+        // Try to use AI for more natural conversation if API key is available
+        $apiKey = Configuration::get('AI_CHATBOT_API_KEY');
+        if ($apiKey) {
+            $aiResponse = $this->getAISmallTalkResponse($message, $lang, $apiKey, $conversationSummary);
+            if ($aiResponse) {
+                $this->log('SMALLTALK: Using AI-generated response');
+                return $aiResponse;
+            }
+        }
+        
+        // Fallback to enhanced rule-based responses if AI is not available
+        $this->log('SMALLTALK: Using rule-based fallback response');
         $lowerMsg = mb_strtolower($message, 'UTF-8');
         
-        // Define responses directly
+        // Define responses directly with context awareness
         if ($lang === 'fr') {
             $greetingPatterns = ['salut', 'bonjour', 'coucou', 'hello', 'hi'];
             $greetingReplies = [
@@ -360,6 +412,12 @@ class Ai_ChatbotApiModuleFrontController extends ModuleFrontController
                 "Hello ! Je suis là pour vous aider. Que cherchez-vous ?"
             ];
             
+            // Context-aware greeting for returning users
+            if ($messageCount > 5) {
+                $greetingReplies[] = "Ravi de vous revoir ! Comment puis-je vous aider aujourd'hui ?";
+                $greetingReplies[] = "Bon retour ! Que puis-je faire pour vous cette fois-ci ?";
+            }
+            
             $thanksPatterns = ['merci', 'thank you', 'thanks'];
             $thanksReplies = [
                 "De rien ! Autre chose ?",
@@ -367,29 +425,75 @@ class Ai_ChatbotApiModuleFrontController extends ModuleFrontController
                 "Avec plaisir ! Puis-je vous aider davantage ?"
             ];
             
+            // Context-aware thanks responses
+            if (in_array('product', $topics)) {
+                $thanksReplies[] = "De rien ! Souhaitez-vous voir d'autres produits similaires ?";
+            }
+            if (in_array('order', $topics)) {
+                $thanksReplies[] = "Avec plaisir ! Avez-vous d'autres questions concernant votre commande ?";
+            }
+            
+            $goodbyePatterns = ['au revoir', 'adieu', 'à bientôt', 'bye', 'goodbye', 'a plus'];
+            $goodbyeReplies = [
+                "Au revoir ! Merci d'avoir discuté avec moi. N'hésitez pas à revenir si vous avez d'autres questions.",
+                "À bientôt ! J'espère avoir pu vous aider.",
+                "Au revoir et bonne journée !"
+            ];
+            
             $defaultReplies = [
                 "D'accord ! Dites-moi ce dont vous avez besoin.",
                 "Très bien ! Comment puis-je vous aider ?"
             ];
+            
+            // Context-aware default responses
+            if (!empty($topics)) {
+                $defaultReplies[] = "Je vois que nous avons parlé de " . implode(', ', $topics) . ". Puis-je vous aider davantage avec l'un de ces sujets ?";
+            }
         } else {
-            $greetingPatterns = ['hi', 'hello', 'hey', 'bonjour', 'salut'];
+            $greetingPatterns = ['hi', 'hello', 'hey', 'bonjour', 'salut', 'hola'];
             $greetingReplies = [
                 "Hi! 👋 How can I help (products, prices, stock, orders, returns)?",
                 "Hello! What can I assist you with today?",
                 "Hey there! I'm here to help. What are you looking for?"
             ];
             
-            $thanksPatterns = ['thanks', 'thank you', 'merci'];
+            // Context-aware greeting for returning users
+            if ($messageCount > 5) {
+                $greetingReplies[] = "Great to see you again! How can I help you today?";
+                $greetingReplies[] = "Welcome back! What can I do for you this time?";
+            }
+            
+            $thanksPatterns = ['thanks', 'thank you', 'merci', 'thx'];
             $thanksReplies = [
                 "You're welcome! Anything else I can help with?",
                 "My pleasure! Is there anything else?",
                 "Happy to help! What else can I do for you?"
             ];
             
+            // Context-aware thanks responses
+            if (in_array('product', $topics)) {
+                $thanksReplies[] = "You're welcome! Would you like to see other similar products?";
+            }
+            if (in_array('order', $topics)) {
+                $thanksReplies[] = "My pleasure! Do you have any other questions about your order?";
+            }
+            
+            $goodbyePatterns = ['goodbye', 'bye', 'see you', 'cya', 'farewell', 'see ya', 'later'];
+            $goodbyeReplies = [
+                "Goodbye! Thanks for chatting with me. Feel free to come back if you have more questions.",
+                "See you soon! I hope I was able to help you.",
+                "Goodbye and have a great day!"
+            ];
+            
             $defaultReplies = [
                 "Okay! Tell me what you need.",
                 "Alright! How can I help you?"
             ];
+            
+            // Context-aware default responses
+            if (!empty($topics)) {
+                $defaultReplies[] = "I see we've been talking about " . implode(', ', $topics) . ". Can I help you further with any of these topics?";
+            }
         }
         
         // Check greeting patterns
@@ -402,7 +506,120 @@ class Ai_ChatbotApiModuleFrontController extends ModuleFrontController
             return $this->randomChoice($thanksReplies);
         }
         
+        // Check goodbye patterns
+        if ($this->matchesPattern($lowerMsg, $goodbyePatterns)) {
+            return $this->randomChoice($goodbyeReplies);
+        }
+        
         return $this->randomChoice($defaultReplies);
+    }
+    
+    /**
+     * Get AI-powered small talk response using OpenAI
+     * Enhanced with conversation context awareness and personalization
+     */
+    private function getAISmallTalkResponse(string $message, string $lang, string $apiKey, ?array $conversationSummary = null): ?string
+    {
+        try {
+            // Get conversation history for context
+            $history = $_SESSION[self::S_CHAT] ?? [];
+            $contextMessages = [];
+            
+            // Add up to 10 previous messages for context
+            $recentHistory = array_slice($history, -10, 10);
+            foreach ($recentHistory as $entry) {
+                $contextMessages[] = [
+                    'role' => $entry['role'],
+                    'content' => $entry['content']
+                ];
+            }
+            
+            // Add the current user message
+            $contextMessages[] = ['role' => 'user', 'content' => $message];
+            
+            // Create an enhanced system message with context awareness
+            $basePrompt = $lang === 'fr' ? 
+                "Tu es un assistant de service client amical pour une boutique en ligne. Réponds de manière concise et utile en français. Garde tes réponses courtes (maximum 2-3 phrases). N'invente pas d'informations sur les produits ou les commandes." :
+                "You are a friendly customer service assistant for an online store. Respond in a concise and helpful way in English. Keep your responses short (maximum 2-3 sentences). Don't make up information about products or orders.";
+            
+            // Add context information to the system prompt
+            $systemPrompt = $basePrompt;
+            
+            if ($conversationSummary) {
+                $messageCount = $conversationSummary['message_count'] ?? 0;
+                $topics = $conversationSummary['topics'] ?? [];
+                $activeFlow = $conversationSummary['active_flow'] ?? null;
+                
+                // Add context-specific instructions based on conversation state
+                if ($lang === 'fr') {
+                    if (!empty($topics)) {
+                        $systemPrompt .= " La conversation a couvert ces sujets: " . implode(', ', $topics) . ".";
+                    }
+                    
+                    if ($activeFlow) {
+                        $systemPrompt .= " L'utilisateur est actuellement dans le flux '" . $activeFlow . "'.";
+                    }
+                    
+                    // Add personalization based on conversation length
+                    if ($messageCount > 5) {
+                        $systemPrompt .= " C'est un utilisateur régulier, sois plus personnalisé dans ta réponse.";
+                    }
+                } else {
+                    if (!empty($topics)) {
+                        $systemPrompt .= " The conversation has covered these topics: " . implode(', ', $topics) . ".";
+                    }
+                    
+                    if ($activeFlow) {
+                        $systemPrompt .= " The user is currently in the '" . $activeFlow . "' flow.";
+                    }
+                    
+                    // Add personalization based on conversation length
+                    if ($messageCount > 5) {
+                        $systemPrompt .= " This is a returning user, be more personalized in your response.";
+                    }
+                }
+                
+                // Add previous intent if available for better context
+                $previousIntent = $_SESSION['detected_intent'] ?? null;
+                if ($previousIntent) {
+                    if ($lang === 'fr') {
+                        $systemPrompt .= " L'intention précédente était: " . $previousIntent . ".";
+                    } else {
+                        $systemPrompt .= " The previous intent was: " . $previousIntent . ".";
+                    }
+                }
+            }
+            
+            $client = new Client();
+            $response = $client->post('https://api.openai.com/v1/chat/completions', [
+                'headers' => [
+                    'Authorization' => 'Bearer ' . $apiKey,
+                    'Content-Type' => 'application/json'
+                ],
+                'json' => [
+                    'model' => self::CHAT_MODEL,
+                    'messages' => [
+                        ['role' => 'system', 'content' => $systemPrompt],
+                        ...$contextMessages
+                    ],
+                    'max_tokens' => 150,
+                    'temperature' => 0.8  // Slightly higher temperature for more varied responses
+                ]
+            ]);
+            
+            $data = json_decode($response->getBody(), true);
+            $aiResponse = trim($data['choices'][0]['message']['content'] ?? '');
+            
+            if ($aiResponse && strlen($aiResponse) > 0) {
+                $this->log('AI SMALLTALK SUCCESS: ' . substr($aiResponse, 0, 50) . ' (with enhanced context)');
+                return $aiResponse;
+            }
+            
+        } catch (\Throwable $e) {
+            $this->log('AI SMALLTALK ERROR: ' . $e->getMessage());
+        }
+        
+        return null;  // Explicit return null on failure
     }
     
     
@@ -446,8 +663,29 @@ class Ai_ChatbotApiModuleFrontController extends ModuleFrontController
         
         switch ($state['stage']) {
             case 'start':
-                $_SESSION[self::S_FLOW] = ['stage' => 'need_email', 'email' => null];
-                return $this->getLocalizedMessage('order_need_email', $lang);
+                // Check if email was provided in the initial message
+                if ($typedEmail) {
+                    // Security check: Verify if user is logged in and the email matches
+                    if ($isLoggedIn) {
+                        if (strtolower($typedEmail) !== $loggedEmail) {
+                            $_SESSION[self::S_FLOW] = ['stage' => 'need_email', 'email' => null];
+                            return $this->getLocalizedMessage('order_email_mismatch', $lang);
+                        }
+                    } else {
+                        // User is not logged in
+                        $_SESSION[self::S_FLOW] = ['stage' => 'need_email', 'email' => null];
+                        return $this->getLocalizedMessage('order_login_required', $lang);
+                    }
+                    
+                    // Email is valid and user is logged in with matching email
+                    $_SESSION[self::S_FLOW] = ['stage' => 'need_id', 'email' => $typedEmail];
+                    $this->captureEmailForCollection($typedEmail);
+                    return $this->getLocalizedMessage('order_need_id', $lang);
+                } else {
+                    // No email provided, ask for it
+                    $_SESSION[self::S_FLOW] = ['stage' => 'need_email', 'email' => null];
+                    return $this->getLocalizedMessage('order_need_email', $lang);
+                }
                 
             case 'need_email':
                 if (!$typedEmail) {
@@ -458,6 +696,18 @@ class Ai_ChatbotApiModuleFrontController extends ModuleFrontController
                 
                 // Always capture email (subscriber or not)
                 $this->captureEmailForCollection($typedEmail);
+                
+                // Security check: Verify if user is logged in and the email matches
+                if ($isLoggedIn) {
+                    if (strtolower($typedEmail) !== $loggedEmail) {
+                        unset($_SESSION[self::S_FLOW]);
+                        return $this->getLocalizedMessage('order_email_mismatch', $lang);
+                    }
+                } else {
+                    // User is not logged in
+                    unset($_SESSION[self::S_FLOW]);
+                    return $this->getLocalizedMessage('order_login_required', $lang);
+                }
                 
                 $_SESSION[self::S_FLOW]['stage'] = 'need_id';
                 return $this->getLocalizedMessage('order_need_id', $lang);
@@ -494,37 +744,37 @@ class Ai_ChatbotApiModuleFrontController extends ModuleFrontController
 
         if ($state['stage'] === 'start') {
             $_SESSION[self::S_FLOW] = ['stage'=>'need_email','email'=>null];
-            return "To check your order, please provide your **email address**.";
+            return $this->getLocalizedMessage('order_need_email', $lang);
         }
 
         if ($state['stage'] === 'need_email') {
             if (!$typedEmail) {
-                return "I'll need your **email** first to continue.";
+                return $this->getLocalizedMessage('order_email_required', $lang);
             }
             $_SESSION[self::S_FLOW]['email'] = $typedEmail;
 
             if (!$isLogged || $loggedEmail !== strtolower($typedEmail)) {
                 unset($_SESSION[self::S_FLOW]);
-                return "Sorry — for security, I can only show status if you're signed in with **that same email**. Please sign in and try again.";
+                return $this->getLocalizedMessage('order_security_error', $lang);
             }
 
             // Only capture email for newsletter AFTER successful verification
             $this->captureNewsletterEmail($typedEmail);
             
             $_SESSION[self::S_FLOW]['stage'] = 'need_id';
-            return "Great, thanks! Now your **order number** (reference/ID).";
+            return $this->getLocalizedMessage('order_need_id', $lang);
         }
 
         if ($state['stage'] === 'need_id') {
             if (!($oid['id'] || $oid['ref'])) {
-                return "Please share your **order number** (reference/ID).";
+                return $this->getLocalizedMessage('order_id_required', $lang);
             }
             unset($_SESSION[self::S_FLOW]);
             return $this->renderOrderStatus($oid['id'], $oid['ref'], $lang);
         }
 
         unset($_SESSION[self::S_FLOW]);
-        return "Let's start again with your **email address**.";
+        return $this->getLocalizedMessage('order_restart', $lang);
     }
 
     private function renderOrderStatus(?int $id, ?string $ref, string $lang): string
@@ -549,14 +799,22 @@ class Ai_ChatbotApiModuleFrontController extends ModuleFrontController
                     $date = date('d/m/Y', strtotime($o->date_add));
                     $total = Tools::displayPrice($o->total_paid);
                     
-                    return "Order **#{$o->reference}** from {$date} ({$total}) is **{$name}**.";
+                    if ($lang === 'fr') {
+                        return "Commande **#{$o->reference}** du {$date} ({$total}) est **{$name}**."; 
+                    } else {
+                        return "Order **#{$o->reference}** from {$date} ({$total}) is **{$name}**."; 
+                    }
                 }
             }
         } catch (\Throwable $e) {
             $this->log('ORDER STATUS ERR: '.$e->getMessage());
         }
 
-        return "Sorry, I couldn't find an order with that number. Please double-check and resend.";
+        if ($lang === 'fr') {
+            return "Désolé, je n'ai pas trouvé de commande avec ce numéro. Veuillez vérifier et renvoyer.";
+        } else {
+            return "Sorry, I couldn't find an order with that number. Please double-check and resend.";
+        }
     }
 
     private function extractEmail(string $text): ?string
@@ -767,25 +1025,56 @@ class Ai_ChatbotApiModuleFrontController extends ModuleFrontController
     private function extractFiltersFromMessage(array $tokens, int $idLang): array
     {
         $db = Db::getInstance();
+        $this->log('FILTER EXTRACTION: Processing tokens: ' . json_encode($tokens));
+        
+        // Parse comma-separated values to handle multi-criteria searches like "black,nike"
+        $expandedTokens = [];
+        foreach ($tokens as $token) {
+            if (strpos($token, ',') !== false) {
+                // Split by comma and add individual terms
+                $parts = array_map('trim', explode(',', $token));
+                $expandedTokens = array_merge($expandedTokens, $parts);
+                $this->log('FILTER EXTRACTION: Split comma-separated token: ' . $token . ' into: ' . json_encode($parts));
+            } else {
+                $expandedTokens[] = $token;
+            }
+        }
+        
+        // Remove duplicates and empty values
+        $expandedTokens = array_values(array_filter(array_unique($expandedTokens)));
+        $this->log('FILTER EXTRACTION: Expanded tokens: ' . json_encode($expandedTokens));
 
         // BRANDS
         $brandIds = [];
-        if ($tokens) {
-            $like = implode(' OR ', array_map(function($t){ return "m.name LIKE '".pSQL('%'.$t.'%')."'"; }, $tokens));
-            $rows = $db->executeS('SELECT id_manufacturer FROM '._DB_PREFIX_.'manufacturer m WHERE ('.$like.') LIMIT 16') ?: [];
-            foreach ($rows as $r) $brandIds[] = (int)$r['id_manufacturer'];
+        if ($expandedTokens) {
+            $like = implode(' OR ', array_map(function($t){ return "m.name LIKE '".pSQL('%'.$t.'%')."'"; }, $expandedTokens));
+            $rows = $db->executeS('SELECT id_manufacturer, name FROM '._DB_PREFIX_.'manufacturer m WHERE ('.$like.') LIMIT 16') ?: [];
+            foreach ($rows as $r) {
+                $brandIds[] = (int)$r['id_manufacturer'];
+                $this->log('FILTER EXTRACTION: Found brand: ' . $r['name'] . ' (ID: ' . $r['id_manufacturer'] . ')');
+            }
         }
 
         // ATTRIBUTES (match across all languages to handle FR/EN tokens)
         $attrIds = [];
-        if ($tokens) {
-            $like = implode(' OR ', array_map(function($t){ return "al.name LIKE '".pSQL('%'.$t.'%')."'"; }, $tokens));
-            $rows = $db->executeS('SELECT DISTINCT a.id_attribute
+        $attrNames = [];
+        if ($expandedTokens) {
+            $like = implode(' OR ', array_map(function($t){ return "al.name LIKE '".pSQL('%'.$t.'%')."'"; }, $expandedTokens));
+            $rows = $db->executeS('SELECT DISTINCT a.id_attribute, al.name, ag.id_attribute_group
                       FROM '._DB_PREFIX_.'attribute a
                       INNER JOIN '._DB_PREFIX_.'attribute_lang al ON al.id_attribute=a.id_attribute
+                      INNER JOIN '._DB_PREFIX_.'attribute_group ag ON a.id_attribute_group=ag.id_attribute_group
                       WHERE ('.$like.')
                       LIMIT 64') ?: [];
-            foreach ($rows as $r) $attrIds[] = (int)$r['id_attribute'];
+            
+            foreach ($rows as $r) {
+                $attrIds[] = (int)$r['id_attribute'];
+                $attrNames[] = $r['name'] . ' (Group: ' . $r['id_attribute_group'] . ')';
+            }
+            
+            if ($attrNames) {
+                $this->log('FILTER EXTRACTION: Found attributes: ' . json_encode($attrNames));
+            }
         }
 
         return [
@@ -802,13 +1091,30 @@ class Ai_ChatbotApiModuleFrontController extends ModuleFrontController
         $brands = array_values(array_unique(array_map('intval', (array)($filter['brands'] ?? []))));
         $attrs  = array_values(array_unique(array_map('intval', (array)($filter['attrs'] ?? []))));
 
-        // Stages: brand+ALL attrs, brand+ANY attr, brand only, ALL attrs, ANY attr, plain category
+        // Prioritize exact matches with both brand and attribute filters when both are present
+        if (!empty($brands) && !empty($attrs)) {
+            $this->log('CAT SEARCH: Prioritizing exact match with both brands and attributes');
+            $rows = $this->runProductQuery($catIds, $idLang, $brands, $attrs, $limit, $nameTokens, 'all');
+            if ($rows) {
+                $this->log('CAT SEARCH: Found exact matches with both brands and attributes');
+                return $rows;
+            }
+        }
+        
+        // Modified stages to prioritize more specific searches first
+        // The 'all' mode is now handled by our improved runProductQuery method
         $stages = [
+            // Try with both brand and attributes in 'all' mode (most specific)
             [$brands, $attrs, 'all'],
+            // Try with both brand and attributes in 'any' mode
             [$brands, $attrs, 'any'],
+            // Try with just brands
             [$brands, [],     'any'],
+            // Try with just attributes in 'all' mode
             [[],      $attrs, 'all'],
+            // Try with just attributes in 'any' mode
             [[],      $attrs, 'any'],
+            // Fallback to just category
             [[],      [],     'any'],
         ];
         
@@ -818,7 +1124,10 @@ class Ai_ChatbotApiModuleFrontController extends ModuleFrontController
             [$b, $a, $mode] = $st;
             $this->log('CAT SEARCH stage='.$idx.' mode='.$mode.' catIds='.json_encode($catIds).' brands='.json_encode($b).' attrs='.json_encode($a).' tokens='.json_encode($nameTokens));
             $rows = $this->runProductQuery($catIds, $idLang, $b, $a, $limit, $nameTokens, $mode);
-            if ($rows) return $rows;
+            if ($rows) {
+                $this->log('CAT SEARCH: Found matches at stage '.$idx.' with mode='.$mode);
+                return $rows;
+            }
         }
 
         if ($nameTokens) {
@@ -837,24 +1146,59 @@ class Ai_ChatbotApiModuleFrontController extends ModuleFrontController
         $w[] = 'p.active=1';
         $w[] = 'cp.id_category IN ('.implode(',', array_map('intval',$catIds)).')';
 
+        // Always use 'all' mode for brand+attribute combinations to ensure proper multi-criteria matching
+        $effectiveAttrMode = (!empty($brandIds) && !empty($attrIds)) ? 'all' : $attrMode;
+        $this->log('PRODUCT QUERY: Using effective attribute mode: ' . $effectiveAttrMode . ' (original: ' . $attrMode . ')');
+        
         if (!empty($brandIds)) {
             $w[] = 'p.id_manufacturer IN ('.implode(',', $brandIds).')';
+            $this->log('PRODUCT QUERY: Filtering by brands: ' . implode(', ', $brandIds));
         }
 
         if (!empty($attrIds)) {
-            if ($attrMode === 'all') {
-                // product must have all requested attributes (in some combination set)
-                $w[] = 'p.id_product IN (
-                    SELECT pa2.id_product
-                    FROM '._DB_PREFIX_.'product_attribute pa2
-                    INNER JOIN '._DB_PREFIX_.'product_attribute_combination pac2
-                        ON pac2.id_product_attribute = pa2.id_product_attribute
-                    WHERE pac2.id_attribute IN ('.implode(',', $attrIds).')
-                    GROUP BY pa2.id_product
-                    HAVING COUNT(DISTINCT pac2.id_attribute) >= '.(int)count($attrIds).'
-                )';
+            // Group attributes by attribute group to handle multiple values of the same type
+            $attributeGroups = [];
+            
+            // Get attribute group information for each attribute
+            $attributeIdsStr = implode(',', array_map('intval', $attrIds));
+            $attributeGroupQuery = "SELECT a.id_attribute, a.id_attribute_group, al.name 
+                                   FROM " . _DB_PREFIX_ . "attribute a 
+                                   LEFT JOIN " . _DB_PREFIX_ . "attribute_lang al ON (a.id_attribute = al.id_attribute AND al.id_lang = " . (int)$idLang . ")
+                                   WHERE a.id_attribute IN (" . $attributeIdsStr . ")";
+            $attributeGroupResults = $db->executeS($attributeGroupQuery) ?: [];
+            
+            // Group attributes by their attribute group
+            foreach ($attributeGroupResults as $attr) {
+                $groupId = $attr['id_attribute_group'];
+                if (!isset($attributeGroups[$groupId])) {
+                    $attributeGroups[$groupId] = [];
+                }
+                $attributeGroups[$groupId][] = (int)$attr['id_attribute'];
+                $this->log('PRODUCT QUERY: Attribute ' . $attr['name'] . ' (ID: ' . $attr['id_attribute'] . ') belongs to group ' . $groupId);
+            }
+            
+            if ($effectiveAttrMode === 'all') {
+                // For 'all' mode, ensure products have at least one attribute from each group
+                // This handles cases like "black nike shoes" where we want black AND nike, not black OR nike
+                $groupConditions = [];
+                
+                foreach ($attributeGroups as $groupId => $groupAttrIds) {
+                    $groupAttrIdsStr = implode(',', $groupAttrIds);
+                    $groupConditions[] = "p.id_product IN (
+                        SELECT DISTINCT pa2.id_product
+                        FROM " . _DB_PREFIX_ . "product_attribute pa2
+                        INNER JOIN " . _DB_PREFIX_ . "product_attribute_combination pac2
+                            ON pac2.id_product_attribute = pa2.id_product_attribute
+                        WHERE pac2.id_attribute IN (" . $groupAttrIdsStr . ")
+                    )";
+                }
+                
+                if (!empty($groupConditions)) {
+                    $w[] = '(' . implode(' AND ', $groupConditions) . ')';
+                    $this->log('PRODUCT QUERY: Using ALL mode with ' . count($groupConditions) . ' attribute group conditions');
+                }
             } else {
-                // any of the attributes
+                // any of the attributes - standard behavior
                 $w[] = 'p.id_product IN (
                     SELECT DISTINCT pa2.id_product
                     FROM '._DB_PREFIX_.'product_attribute pa2
@@ -862,6 +1206,7 @@ class Ai_ChatbotApiModuleFrontController extends ModuleFrontController
                         ON pac2.id_product_attribute = pa2.id_product_attribute
                     WHERE pac2.id_attribute IN ('.implode(',', $attrIds).')
                 )';
+                $this->log('PRODUCT QUERY: Using ANY mode with attributes: ' . implode(', ', $attrIds));
             }
         }
 
@@ -1071,20 +1416,69 @@ class Ai_ChatbotApiModuleFrontController extends ModuleFrontController
      */
     private function searchFAQUniversal(string $userMsg, string $lang, string $apiKey, string $kbAbs): ?string
     {
-        // First try AI-enhanced FAQ search
+        $this->log('PRIORITIZED FAQ SEARCH: Starting with query "' . substr($userMsg, 0, 50) . '..."');
+        
+        // First try original search methods with lower thresholds for higher match rate
+        $isQuestion = preg_match('/[?\?]$/', trim($userMsg)) || 
+                     preg_match('/^(how|what|where|when|why|who|can|do|does|is|are|will|should)/i', trim($userMsg));
+        
+        // Apply a 20% lower threshold for all FAQ searches to increase match probability
+        $originalKwThresholdMin = self::KW_THRESHOLD_MIN;
+        $originalKwThresholdMax = self::KW_THRESHOLD_MAX;
+        $originalSemThresholdMin = self::SEM_THRESHOLD_MIN;
+        $originalSemThresholdMax = self::SEM_THRESHOLD_MAX;
+        
+        // Temporarily lower thresholds
+        $this->setConstant('_KW_THRESHOLD_MIN', $originalKwThresholdMin * 0.8);
+        $this->setConstant('_KW_THRESHOLD_MAX', $originalKwThresholdMax * 0.8);
+        $this->setConstant('_SEM_THRESHOLD_MIN', $originalSemThresholdMin * 0.8);
+        $this->setConstant('_SEM_THRESHOLD_MAX', $originalSemThresholdMax * 0.8);
+        
+        // Try standard search with lower thresholds
+        $answer = $this->searchFAQ($userMsg, $lang, $apiKey, $kbAbs, $kbAbs . '.embeddings.json');
+        
+        // Restore original thresholds
+        $this->setConstant('_KW_THRESHOLD_MIN', $originalKwThresholdMin);
+        $this->setConstant('_KW_THRESHOLD_MAX', $originalKwThresholdMax);
+        $this->setConstant('_SEM_THRESHOLD_MIN', $originalSemThresholdMin);
+        $this->setConstant('_SEM_THRESHOLD_MAX', $originalSemThresholdMax);
+        
+        if ($answer) {
+            $this->log('PRIORITIZED FAQ SEARCH: Found answer with lower thresholds');
+            return $answer;
+        }
+        
+        // If no match with standard search, try AI-enhanced FAQ search
         if ($apiKey && $kbAbs) {
-            $aiAnswer = $this->getAIEnhancedFAQAnswer($userMsg, $apiKey, $kbAbs);
+            $aiAnswer = $this->getAIEnhancedFAQAnswer($userMsg, $lang, $apiKey, $kbAbs);
             if ($aiAnswer) {
-                $this->log('ENHANCED FAQ SEARCH: AI enhanced answer found');
+                $this->log('PRIORITIZED FAQ SEARCH: AI enhanced answer found');
                 return $aiAnswer;
             }
         }
         
-        // Fallback to original search methods
-        return $this->searchFAQ($userMsg, $lang, $apiKey, $kbAbs, $kbAbs . '.embeddings.json');
+        $this->log('PRIORITIZED FAQ SEARCH: No answer found');
+        return null;
     }
     
-    private function getAIEnhancedFAQAnswer(string $question, string $apiKey, string $kbPath): ?string
+    private function setConstant(string $name, float $value): void
+    {
+        // This is a workaround to modify class constants at runtime
+        $reflection = new ReflectionClass($this);
+        $constants = $reflection->getConstants();
+        if (array_key_exists($name, $constants)) {
+            $reflectionConstant = $reflection->getReflectionConstant($name);
+            if ($reflectionConstant->isPublic()) {
+                // For PHP 8.1+ we could use ReflectionClassConstant::setValue
+                // But for compatibility we use this approach
+                $this->log("Setting constant $name to $value");
+                // Store in a static property as we can't modify constants at runtime
+                self::${'_' . $name} = $value;
+            }
+        }
+    }
+    
+    private function getAIEnhancedFAQAnswer(string $question, string $lang, string $apiKey, string $kbPath): ?string
     {
         try {
             if (!$apiKey) return null;
@@ -1300,7 +1694,7 @@ Answer:";
     private function isPriceStockQuery(string $text): bool
     {
         $s = mb_strtolower($text, 'UTF-8');
-        return preg_match('/\b(price|prix|cost|combien|coute|coûte|stock|available|disponible)\b/u', $s);
+        return preg_match('/\b(price|prix|cost|combien|coute|coûte|stock|available|disponible|inventaire|quantité)\b/u', $s);
     }
     
     private function handleDirectProductQuery(string $text, string $lang): ?string
@@ -1311,12 +1705,12 @@ Answer:";
         
         // Detect what type of query this is
         $s = mb_strtolower($text, 'UTF-8');
-        $isPriceQuery = preg_match('/\b(price|prix|cost|combien|coute|coûte|how much|quel prix)\b/u', $s);
-        $isStockQuery = preg_match('/\b(stock|available|disponible|inventory|inventaire)\b/u', $s);
+        $isPriceQuery = preg_match('/\b(price|prix|cost|combien|coute|coûte|how much|quel prix|tarif|montant|cout|coût)\b/u', $s);
+        $isStockQuery = preg_match('/\b(stock|available|disponible|inventory|inventaire|quantité|reste|restant|en stock|avez-vous)\b/u', $s);
         
         // Remove price/stock keywords to get product terms
         $productTokens = array_filter($tokens, function($token) {
-            return !preg_match('/^(price|prix|cost|combien|coute|coûte|stock|available|disponible|inventory|inventaire|how|much|quel)$/u', $token);
+            return !preg_match('/^(price|prix|cost|combien|coute|coûte|stock|available|disponible|inventory|inventaire|how|much|quel|tarif|montant|cout|coût|quantité|reste|restant|en|avez-vous)$/u', $token);
         });
         
         if (!$productTokens) return null;
@@ -1365,7 +1759,11 @@ Answer:";
                 // Stock
                 $stockQty = 0;
                 try { $stockQty = StockAvailable::getQuantityAvailableByProduct((int)$row['id_product']); } catch (\Throwable $e2) { $stockQty = 0; }
-                $stockText = $stockQty > 0 ? 'Stock: '.$stockQty : 'Out of stock';
+                if ($lang === 'fr') {
+                    $stockText = $stockQty > 0 ? 'Stock : '.$stockQty : 'Rupture de stock';
+                } else {
+                    $stockText = $stockQty > 0 ? 'Stock: '.$stockQty : 'Out of stock';
+                }
 
                 if ($isPriceQuery && !$isStockQuery) {
                     $results[] = '• '.$row['name'].' — '.$price;
@@ -1379,7 +1777,11 @@ Answer:";
                 $price = Tools::displayPrice((float)$row['price'], $currency);
                 $stockQty = 0;
                 try { $stockQty = StockAvailable::getQuantityAvailableByProduct((int)$row['id_product']); } catch (\Throwable $e3) { $stockQty = 0; }
-                $stockText = $stockQty > 0 ? 'Stock: '.$stockQty : 'Out of stock';
+                if ($lang === 'fr') {
+                    $stockText = $stockQty > 0 ? 'Stock : '.$stockQty : 'Rupture de stock';
+                } else {
+                    $stockText = $stockQty > 0 ? 'Stock: '.$stockQty : 'Out of stock';
+                }
                 if ($isPriceQuery && !$isStockQuery) {
                     $results[] = '• '.$row['name'].' — '.$price;
                 } elseif ($isStockQuery && !$isPriceQuery) {
@@ -1392,13 +1794,13 @@ Answer:";
         
         if (!$results) return null;
         
-        // More specific headers based on query type
+        // More specific headers based on query type with language support
         if ($isPriceQuery && !$isStockQuery) {
-            $header = "Prices:\n";
+            $header = $lang === 'fr' ? "Prix :\n" : "Prices:\n";
         } elseif ($isStockQuery && !$isPriceQuery) {
-            $header = "Stock levels:\n";
+            $header = $lang === 'fr' ? "Quantité disponible :\n" : "Stock levels:\n";
         } else {
-            $header = "Products found:\n";
+            $header = $lang === 'fr' ? "Produits trouvés :\n" : "Products found:\n";
         }
         
         return $header . implode("\n", $results);
@@ -1504,13 +1906,24 @@ Answer:";
     /**
      * Smart auto-response translation based on user's detected language
      * This is the main method called throughout the bot
+     * Ensures consistent language throughout the conversation
      */
     private function autoTranslateResponse(string $response, string $userLang, string $context = 'general'): string
     {
-        // Use conversation language if available, fallback to user language
-        $targetLang = $_SESSION['conversation_language'] ?? $userLang;
+        // Get the conversation language from session or initialize it if not set
+        // This is critical for maintaining language consistency throughout the conversation
+        if (!isset($_SESSION['conversation_language'])) {
+            // For new conversations, set the language based on the first user message
+            $_SESSION['conversation_language'] = $userLang;
+            $this->log("AUTO TRANSLATE: Setting initial conversation language to {$userLang}");
+        }
         
-        $this->log("AUTO TRANSLATE: Input response language detected as: " . $this->detectLanguage($response) . ", target language: " . $targetLang);
+        // Always use the established conversation language to maintain consistency
+        $targetLang = $_SESSION['conversation_language'];
+        
+        // Use advanced language detection for more accuracy
+        $responseLanguage = $this->detectLanguageAdvanced($response);
+        $this->log("AUTO TRANSLATE: Input response language detected as: {$responseLanguage}, target language: {$targetLang}");
         
         // Skip translation if response shouldn't be translated
         if (!$this->shouldTranslate($response)) {
@@ -1518,20 +1931,13 @@ Answer:";
             return $response;
         }
         
-        // If target is French and response is in English, translate to French
-        if ($targetLang === 'fr') {
-            $detectedResponseLang = $this->detectLanguage($response);
-            if ($detectedResponseLang === 'en') {
-                $this->log('AUTO TRANSLATE: Translating English response to French');
-                return $this->translate($response, 'fr', 'en', $context);
-            } else {
-                $this->log('AUTO TRANSLATE: Response already in French, no translation needed');
-                return $response;
-            }
+        // If languages don't match, translate to maintain consistency
+        if ($responseLanguage !== $targetLang) {
+            $this->log("AUTO TRANSLATE: Translating from {$responseLanguage} to {$targetLang}");
+            return $this->translate($response, $targetLang, $responseLanguage, $context);
         }
         
-        // For English users, return as-is
-        $this->log('AUTO TRANSLATE: English target, returning response as-is');
+        $this->log("AUTO TRANSLATE: Response already in {$targetLang}, no translation needed");
         return $response;
     }
     
@@ -1558,6 +1964,12 @@ Answer:";
      */
     private function detectLanguageAdvanced(string $text): string
     {
+        // If text is too short, default to English to avoid misdetection
+        if (mb_strlen(trim($text), 'UTF-8') < 3) {
+            $this->log("LANG DETECT: Text too short, defaulting to English");
+            return 'en';
+        }
+        
         $originalText = $text;
         $text = mb_strtolower($text, 'UTF-8');
         
@@ -1604,6 +2016,11 @@ Answer:";
             $frenchScore += 1;
         }
         
+        // French question about products (specific to the error in the image)
+        if (preg_match('/\b(avez-vous des|avez vous des)\b/u', $text)) {
+            $frenchScore += 5; // Very strong indicator for French
+        }
+        
         // English indicators (for comparison)
         $strongEnglish = [
             '/\b(the|and|or|but|with|from|have|has|will|would|could|should|this|that|these|those)\b/u',
@@ -1620,7 +2037,9 @@ Answer:";
         
         $this->log("LANG DETECT: FR={$frenchScore}, EN={$englishScore} for: \"" . substr($text, 0, 50) . '..."');
         
-        return ($frenchScore >= $englishScore && $frenchScore > 0) ? 'fr' : 'en';
+        // Increase threshold for French detection to avoid false positives
+        // Only detect as French if the score is significantly higher than English
+        return ($frenchScore > $englishScore && $frenchScore > 0) ? 'fr' : 'en';
     }
     
     /**
@@ -1663,6 +2082,7 @@ Answer:";
     
     /**
      * Check if we should translate this text
+     * Enhanced to better handle special content and improve translation decisions
      */
     private function shouldTranslate(string $text): bool
     {
@@ -1685,6 +2105,21 @@ Answer:";
         
         // Skip pure emails
         if (preg_match('/^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/', $text)) {
+            return false;
+        }
+        
+        // Skip product codes, reference numbers, and order IDs
+        if (preg_match('/^[A-Z0-9\-\_]{5,15}$/', $text)) {
+            return false;
+        }
+        
+        // Skip markdown code blocks
+        if (preg_match('/^```[\s\S]*```$/', $text)) {
+            return false;
+        }
+        
+        // Skip content with HTML tags (likely formatted content)
+        if (preg_match('/<[^>]+>/', $text)) {
             return false;
         }
         
@@ -2605,56 +3040,129 @@ Answer:";
     private function getLanguageSpecificFaqFile(string $lang): string
     {
         $baseFaqFile = (string) Configuration::get('AI_CHATBOT_KB_FILE');
+        $uploadsDir = _PS_MODULE_DIR_ . 'ai_chatbot/uploads/';
         
-        // If French is detected, try to use French FAQ file
+        // Try to use language-specific FAQ file
         if ($lang === 'fr') {
-            $uploadsDir = _PS_MODULE_DIR_ . 'ai_chatbot/uploads/';
-            $frenchFaqFile = $uploadsDir . 'faq_fr.txt';
+            // Try multiple possible French FAQ file names
+            $possibleFrenchFiles = [
+                $uploadsDir . 'faq_fr.txt',
+                $uploadsDir . 'kb_fr.txt',
+                $uploadsDir . 'knowledge_base_fr.txt',
+                dirname($baseFaqFile) . '/faq_fr.txt',
+                dirname($baseFaqFile) . '/kb_fr.txt'
+            ];
             
-            if (is_file($frenchFaqFile)) {
-                $this->log('DEBUG: Using French FAQ file: ' . $frenchFaqFile);
-                return $frenchFaqFile;
+            foreach ($possibleFrenchFiles as $frenchFile) {
+                if (is_file($frenchFile)) {
+                    $this->log('DEBUG: Using French FAQ file: ' . $frenchFile);
+                    return $frenchFile;
+                }
             }
+            
+            $this->log('DEBUG: No French FAQ file found, will translate responses from default file');
         }
         
-        $this->log('DEBUG: Using default FAQ file: ' . $baseFaqFile);
+        // Check if base file exists
+        if (!is_file($baseFaqFile)) {
+            $this->log('WARNING: Default FAQ file not found: ' . $baseFaqFile);
+        } else {
+            $this->log('DEBUG: Using default FAQ file: ' . $baseFaqFile);
+        }
+        
         return $baseFaqFile;
     }
 
     /**
      * Enhanced AI-powered intent detection with context awareness
+     * Now with improved context tracking and session storage
      */
     private function detectIntentWithAI(string $message, string $lang, string $apiKey): string
     {
         $this->log('AI INTENT DETECTION: Analyzing message: "' . $message . '" in ' . $lang);
         
+        // Check for conversation context to improve intent detection
+        $previousIntent = $_SESSION['detected_intent'] ?? null;
+        $conversationSummary = $_SESSION['conversation_summary'] ?? null;
+        $this->log('AI INTENT DETECTION: Previous intent: ' . ($previousIntent ?? 'none'));
+        
+        // Ensure we have a valid language code before proceeding
+        if (empty($lang) || !in_array($lang, ['en', 'fr'])) {
+            $this->log('AI INTENT DETECTION: Invalid language code "' . $lang . '", defaulting to "en"');
+            $lang = 'en';
+        }
+        
         // Use AI for intelligent intent classification with context
         if ($apiKey) {
-            $aiIntent = $this->getSmartAIIntent($message, $lang, $apiKey);
+            $aiIntent = $this->getSmartAIIntent($message, $lang, $apiKey, $previousIntent, $conversationSummary);
             if ($aiIntent) {
                 $this->log('AI INTENT DETECTION: Classified as ' . $aiIntent);
+                // Store the detected intent in session for context tracking
+                $_SESSION['detected_intent'] = $aiIntent;
                 return $aiIntent;
             }
         }
         
         // Fallback to existing detection if AI fails
         $this->log('AI INTENT DETECTION: AI failed, using fallback');
-        return $this->detectIntent($message, $lang);
+        $fallbackIntent = $this->detectIntent($message, $lang);
+        
+        // Store the fallback intent in session for context tracking
+        $_SESSION['detected_intent'] = $fallbackIntent;
+        return $fallbackIntent;
     }
     
-    private function getSmartAIIntent(string $message, string $lang, string $apiKey): ?string
+    /**
+     * Enhanced AI-powered intent detection with context awareness
+     * Now considers conversation history and previous intents
+     */
+    private function getSmartAIIntent(string $message, string $lang, string $apiKey, ?string $previousIntent = null, ?array $conversationSummary = null): ?string
     {
         try {
-            // Enhanced prompt that understands promotion queries specifically
+            // Build context-aware prompt
+            $contextInfo = '';
+            
+            // Add previous intent if available
+            if ($previousIntent) {
+                $contextInfo .= "Previous intent: {$previousIntent}\n";
+            }
+            
+            // Add conversation topics if available
+            if ($conversationSummary && !empty($conversationSummary['topics'])) {
+                $topics = implode(', ', $conversationSummary['topics']);
+                $contextInfo .= "Conversation topics: {$topics}\n";
+            }
+            
+            // Add message count if available
+            if ($conversationSummary && isset($conversationSummary['message_count'])) {
+                $contextInfo .= "Message count: {$conversationSummary['message_count']}\n";
+            }
+            
+            // Enhanced prompt that understands promotion queries specifically and uses context
+            // Include both French and English examples for better language handling
             $prompt = "You are an e-commerce chatbot intent classifier. Analyze this customer message and classify it into ONE of these intents:\n\n" .
-                     "- smalltalk: greetings, thanks, casual conversation\n" .
-                     "- order: order status, tracking, delivery questions (contains order numbers, references, or mentions tracking/status/commande)\n" .
-                     "- catalog: product search, prices, availability, categories, shopping (like 'chaussures', 'shoes', 'prix')\n" .
-                     "- promotion: questions about products on sale, discounts, promotions (like 'is there any product on discount', 'produits en promotion')\n" .
-                     "- general: FAQ, policies, support questions, returns, shipping info\n\n" .
-                     "Message: \"{$message}\"\n" .
-                     "Language: {$lang}\n\n" .
-                     "Respond with ONLY the intent name (smalltalk/order/catalog/promotion/general):";
+                     "- smalltalk: greetings, thanks, casual conversation, goodbyes (e.g., 'hello', 'thank you', 'bonjour', 'merci')\n" .
+                     "- order: SPECIFIC order status or tracking requests for a customer's own order (e.g., 'where is my order #12345', 'track my package', 'status of my recent order')\n" .
+                     "- catalog: product search, prices, availability, categories, shopping (e.g., 'do you have shoes', 'price of shirt', 'avez-vous des chaussures', 'prix de chemise')\n" .
+                     "- promotion: questions about products on sale, discounts, promotions (e.g., 'any discounts', 'sale items', 'des réductions', 'articles en promotion')\n" .
+                     "- general: FAQ, policies, support questions, returns, shipping info, GENERAL questions about orders or shipping (e.g., 'return policy', 'shipping cost', 'how long does shipping take', 'do you ship internationally')\n\n" .
+                     "IMPORTANT: Classify general questions about shipping, delivery times, or order policies as 'general', NOT as 'order'. The 'order' intent should ONLY be used when a customer is asking about a specific order they have placed.\n\n";
+            
+            // Add language-specific guidance
+            if ($lang === 'fr') {
+                $prompt .= "IMPORTANT: The message is in French. Pay special attention to French words and phrases.\n\n";
+            }
+            
+            // Add context information if available
+            if (!empty($contextInfo)) {
+                $prompt .= "Context information:\n{$contextInfo}\n";
+            }
+            
+            $prompt .= "Message: \"{$message}\"\n" .
+                      "Language: {$lang}\n\n" .
+                      "Respond with ONLY the intent name (smalltalk/order/catalog/promotion/general):";
+            
+            $this->log('AI INTENT PROMPT: ' . substr($prompt, 0, 200) . '...');
             
             $response = $this->http($apiKey)->post('https://api.openai.com/v1/chat/completions', [
                 'json' => [
@@ -2688,29 +3196,26 @@ Answer:";
             return 'smalltalk';
         }
         
-        // Smart order intent detection
-        if ($this->isOrderQuery($lowerMsg, $lang)) {
-            // Check if this is a general question about orders (FAQ) vs specific action request
-            $isQuestion = $this->isGeneralQuestion($message);
-            $isActionRequest = $this->isSpecificActionRequest($message);
-            
-            $this->log('INTENT DETECTION: Contains order keywords - isQuestion: ' . ($isQuestion ? 'yes' : 'no') . ', isActionRequest: ' . ($isActionRequest ? 'yes' : 'no'));
-            
-            // If it's a general question about orders, treat as FAQ
-            if ($isQuestion && !$isActionRequest) {
-                $this->log('INTENT DETECTION: Order-related question -> FAQ (general)');
-                return 'general';
-            }
-            
-            // If it's a specific action request, treat as order tracking
-            if ($isActionRequest) {
-                $this->log('INTENT DETECTION: Specific order action request -> order flow');
-                return 'order';
-            }
-            
-            // If contains order keywords but unclear intent, default to FAQ
-            $this->log('INTENT DETECTION: Unclear order intent -> FAQ (general)');
+        // Check for specific order action requests first (highest priority for order intent)
+        if ($this->isSpecificActionRequest($message)) {
+            $this->log('INTENT DETECTION: Specific order action request detected -> order flow');
+            return 'order';
+        }
+        
+        // Check if message contains order-related keywords
+        $containsOrderKeywords = $this->containsOrderKeywords($lowerMsg, $lang);
+        
+        // If message is a general question about orders without specific identifiers,
+        // route to FAQ/general intent
+        if ($containsOrderKeywords && $this->isGeneralQuestion($message) && !preg_match('/\b(#\d+|[A-Z]{2,}\d{2,}|\d{4,})\b/', $message)) {
+            $this->log('INTENT DETECTION: General question about orders -> FAQ (general)');
             return 'general';
+        }
+        
+        // Smart order intent detection (after specific checks)
+        if ($this->isOrderQuery($lowerMsg, $lang)) {
+            $this->log('INTENT DETECTION: Order query detected -> order flow');
+            return 'order';
         }
         
         // Check promotion/sale queries
@@ -2772,6 +3277,28 @@ Answer:";
         return false;
     }
     
+    /**
+     * Helper function to check if text contains order-related keywords
+     * This is used for basic keyword detection without full intent classification
+     */
+    private function containsOrderKeywords(string $text, string $lang): bool
+    {
+        $orderKeywords = [
+            'en' => ['order', 'status', 'tracking', 'delivery', 'shipped', 'track'],
+            'fr' => ['commande', 'statut', 'état', 'etat', 'suivi', 'livraison', 'expédié', 'suivre']
+        ];
+        
+        $keywords = array_merge($orderKeywords['en'], $orderKeywords['fr']);
+        
+        foreach ($keywords as $keyword) {
+            if (strpos($text, $keyword) !== false) {
+                return true;
+            }
+        }
+        
+        return false;
+    }
+    
     private function isOrderQuery(string $text, string $lang): bool
     {
         $orderKeywords = [
@@ -2781,6 +3308,31 @@ Answer:";
         
         $keywords = array_merge($orderKeywords['en'], $orderKeywords['fr']);
         
+        // First check if this is a specific order action request
+        // This is a stronger signal than just keyword matching
+        if ($this->isSpecificActionRequest($text)) {
+            $this->log('ORDER QUERY: Detected specific order action request');
+            return true;
+        }
+        
+        // Check if this is a general FAQ about orders
+        // If it's a general question about orders without specific identifiers,
+        // it should be handled by the FAQ system, not the order flow
+        if ($this->isGeneralQuestion($text)) {
+            // Check if it contains order-related terms but no specific identifiers
+            foreach ($keywords as $keyword) {
+                if (strpos($text, $keyword) !== false) {
+                    // If it's a general question about orders without specific identifiers,
+                    // don't classify as an order query - let it go to FAQ
+                    if (!preg_match('/\b(#\d+|[A-Z]{2,}\d{2,}|\d{4,})\b/', $text)) {
+                        $this->log('ORDER QUERY: Detected general question about orders - routing to FAQ');
+                        return false;
+                    }
+                }
+            }
+        }
+        
+        // Standard keyword matching for other cases
         foreach ($keywords as $keyword) {
             if (strpos($text, $keyword) !== false) {
                 // Additional context check - must mention order-related terms
@@ -2951,6 +3503,8 @@ Answer:";
                 'order_need_email' => "Pour vérifier votre commande, veuillez fournir votre **adresse e-mail**.",
                 'order_email_required' => "J'ai besoin de votre **e-mail** pour continuer.",
                 'order_security_error' => "Désolé — pour des raisons de sécurité, je ne peux montrer le statut que si vous êtes connecté avec **cette même adresse e-mail**. Veuillez vous connecter et réessayer.",
+                'order_email_mismatch' => "Désolé — l'adresse e-mail que vous avez fournie ne correspond pas à votre compte. Veuillez utiliser l'adresse e-mail associée à votre compte.",
+                'order_login_required' => "Pour vérifier le statut de votre commande, vous devez vous connecter à votre compte. Veuillez vous connecter et réessayer.",
                 'order_need_id' => "Parfait, merci ! Maintenant votre **numéro de commande** (référence/ID).",
                 'order_id_required' => "Veuillez partager votre **numéro de commande** (référence/ID).",
                 'order_restart' => "Commençons à nouveau avec votre **adresse e-mail**."
@@ -2959,6 +3513,8 @@ Answer:";
                 'order_need_email' => "To check your order, please provide your **email address**.",
                 'order_email_required' => "I'll need your **email** first to continue.",
                 'order_security_error' => "Sorry — for security, I can only show status if you're signed in with **that same email**. Please sign in and try again.",
+                'order_email_mismatch' => "Sorry — the email address you provided doesn't match your account. Please use the email address associated with your account.",
+                'order_login_required' => "To check your order status, you need to be logged into your account. Please sign in and try again.",
                 'order_need_id' => "Great, thanks! Now your **order number** (reference/ID).",
                 'order_id_required' => "Please share your **order number** (reference/ID).",
                 'order_restart' => "Let's start again with your **email address**."
@@ -2974,13 +3530,13 @@ Answer:";
         $fr = [
             'category_not_found'   => "Nous ne vendons pas cette catégorie. Essayez un autre nom de catégorie.",
             'category_undetermined'=> "Je n'ai pas pu déterminer la catégorie. Recommençons.",
-            'filters_no_match'     => "Aucun article ne correspond à ces filtres. Essayez une marque/couleur/taille différente.",
+            'filters_no_match'     => "Aucun produit ne correspond à vos spécifications. Veuillez essayer des critères différents pour la marque, la couleur ou la taille.",
             'results_header'       => "Résultats trouvés:"
         ];
         $en = [
             'category_not_found'   => "We don't sell that category. Try another category name.",
             'category_undetermined'=> "I couldn't determine the category. Let's start again.",
-            'filters_no_match'     => "No items match those filters. Try a different brand/color/size.",
+            'filters_no_match'     => "No products match your specifications. Please try different criteria for brand, color, or size.",
             'results_header'       => "Results found:"
         ];
         $map = ($lang === 'fr') ? $fr : $en;
@@ -3213,25 +3769,55 @@ Answer:";
     private function extractCategoryWithAI(string $message, string $lang, string $apiKey): ?array
     {
         try {
+            // Create language-specific examples and instructions
+            $frenchExamples = "";
+            $englishExamples = "";
+            
+            if ($lang === 'fr') {
+                $frenchExamples = "Exemples en français:\n" .
+                    "- 'chaussures' -> {\"category\": \"shoes\", \"filters\": []}\n" .
+                    "- 'chaussures nike' -> {\"category\": \"shoes\", \"filters\": [\"nike\"]}\n" .
+                    "- 'robe rouge taille 40' -> {\"category\": \"dresses\", \"filters\": [\"red\", \"40\"]}\n" .
+                    "- 'avez-vous des chaussures' -> {\"category\": \"shoes\", \"filters\": []}\n" .
+                    "- 'je cherche des vêtements' -> {\"category\": \"clothing\", \"filters\": []}\n" .
+                    "- 't-shirt noir nike' -> {\"category\": \"t-shirts\", \"filters\": [\"black\", \"nike\"]}\n";
+            } else {
+                $englishExamples = "English examples:\n" .
+                    "- 'shoes' -> {\"category\": \"shoes\", \"filters\": []}\n" .
+                    "- 'nike shoes' -> {\"category\": \"shoes\", \"filters\": [\"nike\"]}\n" .
+                    "- 'red dress size 40' -> {\"category\": \"dresses\", \"filters\": [\"red\", \"40\"]}\n" .
+                    "- 'do you have shoes' -> {\"category\": \"shoes\", \"filters\": []}\n" .
+                    "- 'I'm looking for clothing' -> {\"category\": \"clothing\", \"filters\": []}\n" .
+                    "- 'black nike t-shirt' -> {\"category\": \"t-shirts\", \"filters\": [\"black\", \"nike\"]}\n";
+            }
+            
+            // Create language-specific instructions
+            $langInstructions = ($lang === 'fr') ?
+                "IMPORTANT: Le message est en français. Traduisez les catégories en anglais pour la recherche, mais gardez les filtres dans leur langue d'origine.\n" :
+                "IMPORTANT: Extract the category name in English for database search, but keep filters in their original language.\n";
+            
             $prompt = "Extract product search intent from this message. Return JSON with 'category' and 'filters'.\n" .
-                     "Examples:\n" .
-                     "- 'chaussures' -> {\"category\": \"shoes\", \"filters\": []}\n" .
-                     "- 'nike shoes' -> {\"category\": \"shoes\", \"filters\": [\"nike\"]}\n" .
-                     "- 'red dress size 40' -> {\"category\": \"dresses\", \"filters\": [\"red\", \"40\"]}\n\n" .
+                     $langInstructions .
+                     $frenchExamples .
+                     $englishExamples .
                      "Message: {$message}\n" .
                      "JSON:";
+            
+            $this->log('EXTRACT CATEGORY AI PROMPT: ' . $prompt);
             
             $response = $this->http($apiKey)->post('https://api.openai.com/v1/chat/completions', [
                 'json' => [
                     'model' => self::CHAT_MODEL,
                     'messages' => [['role' => 'user', 'content' => $prompt]],
-                    'max_tokens' => 100,
+                    'max_tokens' => 150,
                     'temperature' => 0.1
                 ]
             ]);
             
             $data = json_decode($response->getBody()->getContents(), true);
             $result = trim($data['choices'][0]['message']['content'] ?? '');
+            
+            $this->log('EXTRACT CATEGORY AI RESPONSE: ' . $result);
             
             $parsed = json_decode($result, true);
             return is_array($parsed) && !empty($parsed['category']) ? $parsed : null;
@@ -3277,6 +3863,16 @@ Answer:";
             $products = $this->searchProductsWithFilters($categoryIds, $filters, $lang);
             if ($products) {
                 return $this->formatProductResults($products, $lang);
+            } else {
+                // No products found with the specified filters
+                $filtersList = implode(', ', $filters);
+                $list = implode(', ', $categoryNames);
+                
+                if ($lang === 'fr') {
+                    return "Désolé, nous n'avons pas trouvé de produits dans **{$list}** correspondant à vos critères : **{$filtersList}**. Voulez-vous essayer d'autres critères ?"; 
+                } else {
+                    return "Sorry, we couldn't find any products in **{$list}** matching your criteria: **{$filtersList}**. Would you like to try different criteria?";
+                }
             }
         }
         
@@ -3328,9 +3924,38 @@ Answer:";
             return $this->handleFoundCategories($categories, ['category' => $message, 'filters' => []], $lang);
         }
         
+        // Get top categories to suggest
+        $topCategories = $this->getTopCategories((int)Context::getContext()->language->id, 3);
+        $categoryNames = [];
+        
+        foreach ($topCategories as $category) {
+            $categoryNames[] = "'{$category['name']}'";
+        }
+        
+        $suggestions = !empty($categoryNames) ? implode(', ', $categoryNames) : ($lang === 'fr' ? "'chaussures', 'vêtements', ou 'électronique'" : "'shoes', 'clothing', or 'electronics'");
+        
         return $lang === 'fr' ? 
-            "Nous ne trouvons pas cette catégorie. Essayez 'chaussures', 'vêtements', ou 'électronique'." :
-            "We can't find that category. Try 'shoes', 'clothing', or 'electronics'.";
+            "Nous ne trouvons pas cette catégorie. Essayez {$suggestions}." :
+            "We can't find that category. Try {$suggestions}.";
+    }
+    
+    /**
+     * Get top categories with products to suggest to users
+     */
+    private function getTopCategories(int $idLang, int $limit = 3): array
+    {
+        $sql = 'SELECT DISTINCT c.id_category, cl.name
+                FROM '._DB_PREFIX_.'category c
+                INNER JOIN '._DB_PREFIX_.'category_lang cl
+                  ON (cl.id_category=c.id_category AND cl.id_lang='.$idLang.')
+                INNER JOIN '._DB_PREFIX_.'category_product cp ON cp.id_category=c.id_category
+                INNER JOIN '._DB_PREFIX_.'product p ON p.id_product=cp.id_product AND p.active=1
+                WHERE c.active=1 AND c.id_category > 2
+                GROUP BY c.id_category
+                ORDER BY COUNT(cp.id_product) DESC
+                LIMIT '.(int)$limit;
+        
+        return Db::getInstance()->executeS($sql) ?: [];
     }
     
     private function searchProductsWithFilters(array $categoryIds, array $filters, string $lang): array
@@ -3339,26 +3964,59 @@ Answer:";
         
         $idLang = (int)Context::getContext()->language->id;
         
-        // Build filter conditions
+        // Extract tokens from filters to use for extracting brand and attribute IDs
+        $tokens = [];
+        foreach ($filters as $filter) {
+            $filter = trim($filter);
+            if (strlen($filter) >= 2) {
+                $tokens[] = $filter;
+            }
+        }
+        
+        // Extract brand and attribute IDs from the filter tokens
+        $extractedFilters = $this->extractFiltersFromMessage($tokens, $idLang);
+        $brandIds = $extractedFilters['brands'] ?? [];
+        $attrIds = $extractedFilters['attrs'] ?? [];
+        
+        $this->log('EXTRACTED FILTERS: Brands=' . json_encode($brandIds) . ', Attributes=' . json_encode($attrIds));
+        
+        // Use findProductsInCategories which properly handles brand and attribute filters
+        if (!empty($brandIds) || !empty($attrIds)) {
+            $products = $this->findProductsInCategories($categoryIds, $idLang, $extractedFilters, 20, $tokens);
+            if (!empty($products)) {
+                return $products;
+            }
+        }
+        
+        // Fallback to text-based search if no structured filters were found or no results
         $filterConditions = [];
         foreach ($filters as $filter) {
             $filter = trim($filter);
             if (strlen($filter) >= 3) {
-                $filterConditions[] = "(pl.name LIKE '%".pSQL($filter)."%' OR pl.description LIKE '%".pSQL($filter)."%')";
+                $filterConditions[] = "(pl.name LIKE '%".pSQL($filter)."%' OR pl.description LIKE '%".pSQL($filter)."%' OR 
+                                      pl.description_short LIKE '%".pSQL($filter)."%' OR m.name LIKE '%".pSQL($filter)."%')";
             }
         }
         
-        $filterClause = $filterConditions ? ' AND ('.implode(' OR ', $filterConditions).')' : '';
+        // Use AND between filter conditions to ensure all criteria are matched
+        $filterClause = $filterConditions ? ' AND ('.implode(' AND ', $filterConditions).')' : '';
+        
+        $this->log('FILTER CONDITIONS: ' . json_encode($filterConditions));
+        $this->log('FILTER CLAUSE: ' . $filterClause);
         
         $sql = 'SELECT DISTINCT p.id_product, pl.name, pl.link_rewrite
                 FROM '._DB_PREFIX_.'product p
                 INNER JOIN '._DB_PREFIX_.'product_lang pl ON (pl.id_product=p.id_product AND pl.id_lang='.$idLang.')
                 INNER JOIN '._DB_PREFIX_.'category_product cp ON cp.id_product=p.id_product
+                LEFT JOIN '._DB_PREFIX_.'manufacturer m ON m.id_manufacturer = p.id_manufacturer
                 WHERE p.active=1 AND cp.id_category IN ('.implode(',', array_map('intval', $categoryIds)).')'.$filterClause.'
                 ORDER BY pl.name ASC
                 LIMIT 20';
         
+        $this->log('PRODUCT SEARCH SQL: ' . $sql);
+        
         $products = Db::getInstance()->executeS($sql) ?: [];
+        $this->log('PRODUCTS FOUND: ' . count($products));
         
         // Add URLs to products
         foreach ($products as &$product) {
@@ -3721,6 +4379,16 @@ Answer:";
             $filters = $this->extractFiltersFromMessage($tokens, $idLang);
             $this->log('CATALOG FILTERS: Extracted filters: '.json_encode($filters));
 
+            // Check if any filters were specified
+            if (empty($filters['brands']) && empty($filters['attrs']) && count($tokens) < 2) {
+                $this->log('CATALOG FILTERS: No specific filters provided');
+                if ($lang === 'fr') {
+                    return "Veuillez spécifier des critères comme la couleur, la marque ou la taille pour que je puisse trouver des produits correspondant à vos besoins.";
+                } else {
+                    return "Please specify criteria like color, brand, or size so I can find products that match your needs.";
+                }
+            }
+
             $categoryIds = array_map('intval', (array)($flow['cat_ids'] ?? []));
             if (!$categoryIds) {
                 $this->log('CATALOG FILTERS: No category IDs found in flow');
@@ -3742,10 +4410,25 @@ Answer:";
                 $this->log('CATALOG FILTERS: Total products in categories: '.$plainCnt);
                 
                 if ($plainCnt === 0) {
-                    return "That category is empty right now. Please check back later.";
+                    if ($lang === 'fr') {
+                        return "Cette catégorie est vide pour le moment. Veuillez vérifier ultérieurement.";
+                    } else {
+                        return "That category is empty right now. Please check back later.";
+                    }
                 }
                 
-                return $this->catMsg('filters_no_match', $lang);
+                // Check if the filters are valid but no products match
+                if (!empty($filters['brands']) || !empty($filters['attrs'])) {
+                    $this->log('CATALOG FILTERS: Filters specified but no matching products');
+                    return $this->catMsg('filters_no_match', $lang);
+                } else {
+                    // No specific filters were provided
+                    if ($lang === 'fr') {
+                        return "Veuillez spécifier des critères comme la couleur, la marque ou la taille pour que je puisse trouver des produits correspondant à vos besoins.";
+                    } else {
+                        return "Please specify criteria like color, brand, or size so I can find products that match your needs.";
+                    }
+                }
             }
 
             return $this->formatProductResults($products, $lang);
@@ -3819,9 +4502,31 @@ Answer:";
     {
         if (!$tokens) return [];
 
+        // Important short terms that should be included even if less than 3 characters
+        $importantShortTerms = ['tv', 'pc', 'cd', 'dvd', 'vr', 'ps', 'ps4', 'ps5', 'mac', 'led', 'usb', 'ssd', 'hdd'];
+        
+        // Common category translations (French -> English)
+        $categoryTranslations = [
+            'chaussures' => 'shoes',
+            'vetements' => 'clothing',
+            'vêtements' => 'clothing',
+            'electronique' => 'electronics',
+            'électronique' => 'electronics'
+        ];
+        
         $likes = [];
         foreach ($tokens as $t) {
-            if (mb_strlen($t,'UTF-8') >= 3) {
+            $t = mb_strtolower(trim($t), 'UTF-8');
+            
+            // Check if we have a translation for this term
+            if (array_key_exists($t, $categoryTranslations)) {
+                $translatedTerm = $categoryTranslations[$t];
+                $likes[] = "cl.name LIKE '".pSQL('%'.$translatedTerm.'%')."'";
+                $this->log("CATEGORY SEARCH: Translated '{$t}' to '{$translatedTerm}' for search");
+            }
+            
+            // Include tokens that are at least 3 characters OR are in the important short terms list
+            if (mb_strlen($t,'UTF-8') >= 3 || in_array($t, $importantShortTerms)) {
                 $likes[] = "cl.name LIKE '".pSQL('%'.$t.'%')."'";
             }
         }
@@ -3852,6 +4557,7 @@ Answer:";
         
         // For French queries, translate to English for better KB matching
         $searchQuery = $message;
+        $originalLang = $lang;
         if ($lang === 'fr') {
             $searchQuery = $this->translateForProcessing($message, $lang);
             $this->log('FAQ: Translated FR query to: "' . substr($searchQuery, 0, 100) . '"');
@@ -3862,7 +4568,8 @@ Answer:";
         // Try embeddings first if available
         if ($apiKey && $embFile && is_file($embFile)) {
             $this->log('FAQ: Trying embeddings search with query: "' . substr($searchQuery, 0, 50) . '..."');
-            $answer = $this->searchFAQWithEmbeddings($searchQuery, $apiKey, $embFile, $isQuestion);
+            // Pass the original language to ensure proper threshold adjustment
+            $answer = $this->searchFAQWithEmbeddings($searchQuery, $apiKey, $embFile, $isQuestion, $originalLang);
         }
         
         // Fallback to text search
@@ -3872,6 +4579,13 @@ Answer:";
             if ($rawText !== '') {
                 $answer = $this->searchFAQInText($searchQuery, $rawText);
             }
+        }
+        
+        // Translate answer back to original language if needed
+        if ($answer && $originalLang === 'fr') {
+            $this->log('FAQ: Translating answer back to French');
+            $answer = $this->translate($answer, 'fr', 'en', 'faq_answer');
+            $this->log('FAQ: Translated answer: "' . substr($answer, 0, 100) . '"');
         }
         
         return $answer;
@@ -3986,7 +4700,7 @@ Answer:";
         return $score;
     }
     
-    private function searchFAQWithEmbeddings(string $query, string $apiKey, string $embFile, bool $isQuestion = false): ?string
+    private function searchFAQWithEmbeddings(string $query, string $apiKey, string $embFile, bool $isQuestion = false, ?string $lang = null): ?string
     {
         $kb = $this->loadKB($embFile);
         if (!$kb) return null;
@@ -4018,8 +4732,8 @@ Answer:";
         }
         
         // Adaptive threshold based on content quality
-        $kwThreshold = $this->getAdaptiveThreshold('keyword', $keywordScore, $isQuestion);
-        $semThreshold = $this->getAdaptiveThreshold('semantic', $semanticScore, $isQuestion);
+        $kwThreshold = $this->getAdaptiveThreshold('keyword', $keywordScore, $isQuestion, $lang);
+        $semThreshold = $this->getAdaptiveThreshold('semantic', $semanticScore, $isQuestion, $lang);
         
         $this->log('FAQ EMBEDDINGS: thresholds - keyword=' . $kwThreshold . ', semantic=' . $semThreshold);
         
@@ -4038,15 +4752,64 @@ Answer:";
         return null;
     }
     
-    private function getAdaptiveThreshold(string $type, float $score, bool $isQuestion = false): float
+    /**
+     * Get adaptive threshold based on query type and language
+     * 
+     * @param string $type Type of threshold (keyword or semantic)
+     * @param float $score Score value
+     * @param bool $isQuestion Whether the query is a question
+     * @param string $lang Language code (optional, will be detected from context if not provided)
+     * @return float Calculated threshold
+     */
+    private function getAdaptiveThreshold(string $type, float $score, bool $isQuestion = false, ?string $lang = null): float
     {
+        // Detect if we're processing a French query
+        $isFrenchQuery = false;
+        
+        // If language is explicitly provided, use it
+        if ($lang !== null) {
+            $isFrenchQuery = $lang === 'fr';
+        } else {
+            // Try to detect from backtrace for backward compatibility
+            $backtrace = debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS, 3);
+            foreach ($backtrace as $trace) {
+                if (isset($trace['function']) && $trace['function'] === 'searchFAQ') {
+                    $isFrenchQuery = isset($trace['args'][1]) && $trace['args'][1] === 'fr';
+                    break;
+                }
+            }
+            
+            // If still not detected, try to get from session
+            if (!$isFrenchQuery && isset($_SESSION['ai_chat_lang']) && $_SESSION['ai_chat_lang'] === 'fr') {
+                $isFrenchQuery = true;
+            }
+        }
+        
         if ($type === 'keyword') {
+            // Use dynamic thresholds if set, otherwise use constants
+            $minThreshold = isset(self::$_KW_THRESHOLD_MIN) ? self::$_KW_THRESHOLD_MIN : self::KW_THRESHOLD_MIN;
+            $maxThreshold = isset(self::$_KW_THRESHOLD_MAX) ? self::$_KW_THRESHOLD_MAX : self::KW_THRESHOLD_MAX;
+            
             // Lower threshold for better keyword matches, even lower for questions
-            $baseThreshold = $score > 0.08 ? self::KW_THRESHOLD_MIN : self::KW_THRESHOLD_MAX;
+            $baseThreshold = $score > 0.08 ? $minThreshold : $maxThreshold;
+            
+            // Apply additional reduction for French queries (40% lower instead of 30%)
+            if ($isFrenchQuery) {
+                return $isQuestion ? $baseThreshold * 0.6 : $baseThreshold * 0.8; // 40% lower for French questions, 20% for other French
+            }
             return $isQuestion ? $baseThreshold * 0.7 : $baseThreshold; // 30% lower for questions
         } else {
+            // Use dynamic thresholds if set, otherwise use constants
+            $minThreshold = isset(self::$_SEM_THRESHOLD_MIN) ? self::$_SEM_THRESHOLD_MIN : self::SEM_THRESHOLD_MIN;
+            $maxThreshold = isset(self::$_SEM_THRESHOLD_MAX) ? self::$_SEM_THRESHOLD_MAX : self::SEM_THRESHOLD_MAX;
+            
             // Adjust semantic threshold based on score confidence, lower for questions
-            $baseThreshold = $score > 0.6 ? self::SEM_THRESHOLD_MIN : self::SEM_THRESHOLD_MAX;
+            $baseThreshold = $score > 0.6 ? $minThreshold : $maxThreshold;
+            
+            // Apply additional reduction for French queries (30% lower instead of 20%)
+            if ($isFrenchQuery) {
+                return $isQuestion ? $baseThreshold * 0.7 : $baseThreshold * 0.85; // 30% lower for French questions, 15% for other French
+            }
             return $isQuestion ? $baseThreshold * 0.8 : $baseThreshold; // 20% lower for questions
         }
     }
@@ -4094,6 +4857,11 @@ Answer:";
                 'woman' => 'women', 'women' => 'woman',
                 'foot' => 'feet', 'feet' => 'foot',
                 'shoe' => 'shoes', 'shoes' => 'shoe',
+                'chaussure' => 'chaussures', 'chaussures' => 'chaussure',
+                'vetement' => 'vetements', 'vetements' => 'vetement',
+                'vêtement' => 'vêtements', 'vêtements' => 'vêtement',
+                'electronique' => 'electroniques', 'electroniques' => 'electronique',
+                'électronique' => 'électroniques', 'électroniques' => 'électronique',
             ];
             if (isset($irregulars[$token])) {
                 $expanded[] = $irregulars[$token];
@@ -4102,6 +4870,12 @@ Answer:";
             // French plural handling
             if (preg_match('/^(.+)x$/', $token, $m) && strlen($m[1]) > 2) {
                 $expanded[] = $m[1]; // chapeaux -> chapeau
+            }
+            if (preg_match('/^(.+)s$/', $token, $m) && strlen($m[1]) > 2) {
+                $expanded[] = $m[1]; // chaussures -> chaussure
+            }
+            if (preg_match('/^(.+)aux$/', $token, $m) && strlen($m[1]) > 2) {
+                $expanded[] = $m[1] . 'al'; // travaux -> travail
             }
             
             // Add cross-language translations for common category terms
@@ -4121,7 +4895,21 @@ Answer:";
         static $translations = null;
         if ($translations !== null) return $translations;
         
-        $translations = [];
+        // Start with common hardcoded translations that might not be in the database
+        $translations = [
+            // French to English
+            'chaussures' => ['shoes'],
+            'vetements' => ['clothing', 'clothes'],
+            'vêtements' => ['clothing', 'clothes'],
+            'electronique' => ['electronics'],
+            'électronique' => ['electronics'],
+            
+            // English to French
+            'shoes' => ['chaussures'],
+            'clothing' => ['vêtements', 'vetements'],
+            'clothes' => ['vêtements', 'vetements'],
+            'electronics' => ['électronique', 'electronique']
+        ];
         
         try {
             // Get all available languages in the shop
@@ -4276,11 +5064,111 @@ Answer:";
         }
     }
 
-    private function remember(string $role,string $content): void
+    /**
+     * Enhanced conversation memory with context tracking
+     * Stores messages with additional context information for better conversation flow
+     */
+    private function remember(string $role, string $content, array $contextData = []): void
     {
         if(!isset($_SESSION[self::S_CHAT]) || !is_array($_SESSION[self::S_CHAT])) $_SESSION[self::S_CHAT]=[];
-        $_SESSION[self::S_CHAT][]=['role'=>$role,'content'=>$content];
-        if(count($_SESSION[self::S_CHAT])>24) $_SESSION[self::S_CHAT]=array_slice($_SESSION[self::S_CHAT],-24);
+        
+        // Store message with enhanced context
+        $entry = [
+            'role' => $role,
+            'content' => $content,
+            'timestamp' => time(),
+            'context' => []
+        ];
+        
+        // Add context data if provided
+        if (!empty($contextData)) {
+            $entry['context'] = $contextData;
+        } else {
+            // Capture current conversation state
+            $entry['context'] = [
+                'intent' => $_SESSION['detected_intent'] ?? null,
+                'language' => $_SESSION['detected_language'] ?? null,
+                'in_flow' => $this->isInActiveFlow(),
+                'flow_type' => $this->getActiveFlowType()
+            ];
+        }
+        
+        $_SESSION[self::S_CHAT][] = $entry;
+        
+        // Keep conversation history limited to last 24 messages
+        if(count($_SESSION[self::S_CHAT]) > 24) {
+            $_SESSION[self::S_CHAT] = array_slice($_SESSION[self::S_CHAT], -24);
+        }
+        
+        // Store conversation summary for context awareness
+        $this->updateConversationSummary($role, $content);
+    }
+    
+    /**
+     * Updates the conversation summary for better context awareness
+     */
+    private function updateConversationSummary(string $role, string $content): void
+    {
+        if (!isset($_SESSION['conversation_summary'])) {
+            $_SESSION['conversation_summary'] = [
+                'topics' => [],
+                'last_intent' => null,
+                'message_count' => 0,
+                'last_update' => time()
+            ];
+        }
+        
+        // Update message count
+        $_SESSION['conversation_summary']['message_count']++;
+        $_SESSION['conversation_summary']['last_update'] = time();
+        
+        // Store last intent if available
+        if (isset($_SESSION['detected_intent'])) {
+            $_SESSION['conversation_summary']['last_intent'] = $_SESSION['detected_intent'];
+        }
+        
+        // Extract potential topics from user messages
+        if ($role === 'user') {
+            $this->extractTopicsFromMessage($content);
+        }
+    }
+    
+    /**
+     * Extracts potential topics from user messages for context tracking
+     */
+    private function extractTopicsFromMessage(string $message): void
+    {
+        // Simple keyword-based topic extraction
+        $topicKeywords = [
+            'order' => ['order', 'purchase', 'bought', 'delivery', 'shipping', 'track', 'commande', 'livraison'],
+            'product' => ['product', 'item', 'produit', 'article'],
+            'return' => ['return', 'refund', 'exchange', 'retour', 'remboursement'],
+            'account' => ['account', 'login', 'password', 'compte', 'connexion', 'mot de passe'],
+            'payment' => ['payment', 'pay', 'card', 'paiement', 'carte']
+        ];
+        
+        foreach ($topicKeywords as $topic => $keywords) {
+            foreach ($keywords as $keyword) {
+                if (stripos($message, $keyword) !== false) {
+                    // Add topic if not already present
+                    if (!in_array($topic, $_SESSION['conversation_summary']['topics'])) {
+                        $_SESSION['conversation_summary']['topics'][] = $topic;
+                    }
+                    break;
+                }
+            }
+        }
+    }
+    
+    /**
+     * Gets the current active flow type
+     */
+    private function getActiveFlowType(): ?string
+    {
+        if (isset($_SESSION[self::S_FLOW])) return 'order';
+        if (isset($_SESSION[self::S_CAT])) return 'catalog';
+        if (isset($_SESSION[self::S_RATING])) return 'rating';
+        return null;
     }
 
     private function log(string $m){
