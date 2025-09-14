@@ -117,19 +117,21 @@ class Ai_ChatbotApiModuleFrontController extends ModuleFrontController
             $intent = $this->detectIntentWithAI($userMsg, $lang, $apiKey);
             $this->log('Detected intent: '.$intent);
             
-            /* 0) Enhanced FAQ Search with AI assistance - PRIORITIZED FIRST */
-            $faqAnswer = $this->searchFAQUniversal($userMsg, $lang, $apiKey, $kbAbs);
-            if ($faqAnswer) {
-                // Ensure the answer is in the user's language
-                $finalAnswer = $this->ensureAnswerInUserLanguage($faqAnswer, $lang, $apiKey);
-                $this->remember('user', $userMsg);
-                $this->remember('assistant', $finalAnswer);
-                $this->out([
-                    'reply' => $finalAnswer, 
-                    'source' => 'faq',
-                    'conversation' => $_SESSION[self::S_CHAT] ?? []
-                ]); 
-                return;
+            /* 0) FAQ Search - only for general questions, not specific intents */
+            if ($intent === 'general' || $this->isGeneralQuestion($userMsg)) {
+                $faqAnswer = $this->searchFAQUniversal($userMsg, $lang, $apiKey, $kbAbs);
+                if ($faqAnswer) {
+                    // Ensure the answer is in the user's language
+                    $finalAnswer = $this->ensureAnswerInUserLanguage($faqAnswer, $lang, $apiKey);
+                    $this->remember('user', $userMsg);
+                    $this->remember('assistant', $finalAnswer);
+                    $this->out([
+                        'reply' => $finalAnswer, 
+                        'source' => 'faq',
+                        'conversation' => $_SESSION[self::S_CHAT] ?? []
+                    ]); 
+                    return;
+                }
             }
             
             /* 1) Small talk handling (only when NOT in an active flow and message is not an email) */
@@ -1026,6 +1028,7 @@ class Ai_ChatbotApiModuleFrontController extends ModuleFrontController
     {
         $db = Db::getInstance();
         $this->log('FILTER EXTRACTION: Processing tokens: ' . json_encode($tokens));
+        $this->log('FILTER EXTRACTION: Input message: "' . implode(' ', $tokens) . '"');
         
         // Parse comma-separated values to handle multi-criteria searches like "black,nike"
         $expandedTokens = [];
@@ -1044,36 +1047,77 @@ class Ai_ChatbotApiModuleFrontController extends ModuleFrontController
         $expandedTokens = array_values(array_filter(array_unique($expandedTokens)));
         $this->log('FILTER EXTRACTION: Expanded tokens: ' . json_encode($expandedTokens));
 
-        // BRANDS
+        // BRANDS - Use exact match first, then LIKE for better precision
         $brandIds = [];
         if ($expandedTokens) {
-            $like = implode(' OR ', array_map(function($t){ return "m.name LIKE '".pSQL('%'.$t.'%')."'"; }, $expandedTokens));
-            $rows = $db->executeS('SELECT id_manufacturer, name FROM '._DB_PREFIX_.'manufacturer m WHERE ('.$like.') LIMIT 16') ?: [];
+            // First try exact matches
+            $exactMatches = [];
+            $likeMatches = [];
+            
+            foreach ($expandedTokens as $token) {
+                $exactMatches[] = "m.name = '".pSQL($token)."'";
+                $likeMatches[] = "m.name LIKE '".pSQL('%'.$token.'%')."'";
+            }
+            
+            // Try exact matches first
+            $exactQuery = 'SELECT id_manufacturer, name FROM '._DB_PREFIX_.'manufacturer m WHERE ('.implode(' OR ', $exactMatches).') LIMIT 16';
+            $rows = $db->executeS($exactQuery) ?: [];
+            
+            // If no exact matches, try LIKE matches
+            if (empty($rows)) {
+                $likeQuery = 'SELECT id_manufacturer, name FROM '._DB_PREFIX_.'manufacturer m WHERE ('.implode(' OR ', $likeMatches).') LIMIT 16';
+                $rows = $db->executeS($likeQuery) ?: [];
+            }
+            
             foreach ($rows as $r) {
                 $brandIds[] = (int)$r['id_manufacturer'];
                 $this->log('FILTER EXTRACTION: Found brand: ' . $r['name'] . ' (ID: ' . $r['id_manufacturer'] . ')');
             }
         }
 
-        // ATTRIBUTES (match across all languages to handle FR/EN tokens)
+        // ATTRIBUTES - Use exact match first, then LIKE for better precision
         $attrIds = [];
         $attrNames = [];
         if ($expandedTokens) {
-            $like = implode(' OR ', array_map(function($t){ return "al.name LIKE '".pSQL('%'.$t.'%')."'"; }, $expandedTokens));
-            $rows = $db->executeS('SELECT DISTINCT a.id_attribute, al.name, ag.id_attribute_group
-                      FROM '._DB_PREFIX_.'attribute a
-                      INNER JOIN '._DB_PREFIX_.'attribute_lang al ON al.id_attribute=a.id_attribute
-                      INNER JOIN '._DB_PREFIX_.'attribute_group ag ON a.id_attribute_group=ag.id_attribute_group
-                      WHERE ('.$like.')
-                      LIMIT 64') ?: [];
+            // First try exact matches
+            $exactMatches = [];
+            $likeMatches = [];
+            
+            foreach ($expandedTokens as $token) {
+                $exactMatches[] = "al.name = '".pSQL($token)."'";
+                $likeMatches[] = "al.name LIKE '".pSQL('%'.$token.'%')."'";
+            }
+            
+            // Try exact matches first
+            $exactQuery = 'SELECT DISTINCT a.id_attribute, al.name, ag.id_attribute_group
+                          FROM '._DB_PREFIX_.'attribute a
+                          INNER JOIN '._DB_PREFIX_.'attribute_lang al ON al.id_attribute=a.id_attribute
+                          INNER JOIN '._DB_PREFIX_.'attribute_group ag ON a.id_attribute_group=ag.id_attribute_group
+                          WHERE ('.implode(' OR ', $exactMatches).')
+                          LIMIT 64';
+            $rows = $db->executeS($exactQuery) ?: [];
+            
+            // If no exact matches, try LIKE matches
+            if (empty($rows)) {
+                $likeQuery = 'SELECT DISTINCT a.id_attribute, al.name, ag.id_attribute_group
+                              FROM '._DB_PREFIX_.'attribute a
+                              INNER JOIN '._DB_PREFIX_.'attribute_lang al ON al.id_attribute=a.id_attribute
+                              INNER JOIN '._DB_PREFIX_.'attribute_group ag ON a.id_attribute_group=ag.id_attribute_group
+                              WHERE ('.implode(' OR ', $likeMatches).')
+                              LIMIT 64';
+                $rows = $db->executeS($likeQuery) ?: [];
+            }
             
             foreach ($rows as $r) {
                 $attrIds[] = (int)$r['id_attribute'];
                 $attrNames[] = $r['name'] . ' (Group: ' . $r['id_attribute_group'] . ')';
+                $this->log('FILTER EXTRACTION: Found attribute: ' . $r['name'] . ' (ID: ' . $r['id_attribute'] . ', Group: ' . $r['id_attribute_group'] . ')');
             }
             
             if ($attrNames) {
-                $this->log('FILTER EXTRACTION: Found attributes: ' . json_encode($attrNames));
+                $this->log('FILTER EXTRACTION: All found attributes: ' . json_encode($attrNames));
+            } else {
+                $this->log('FILTER EXTRACTION: No attributes found for tokens: ' . json_encode($expandedTokens));
             }
         }
 
@@ -1098,6 +1142,9 @@ class Ai_ChatbotApiModuleFrontController extends ModuleFrontController
             if ($rows) {
                 $this->log('CAT SEARCH: Found exact matches with both brands and attributes');
                 return $rows;
+            } else {
+                $this->log('CAT SEARCH: No exact matches found for both brands and attributes - returning empty');
+                return []; // Don't fall back to partial matches when both are specified
             }
         }
         
@@ -1117,6 +1164,16 @@ class Ai_ChatbotApiModuleFrontController extends ModuleFrontController
             // Fallback to just category
             [[],      [],     'any'],
         ];
+        
+        // If we have both brands and attributes, we MUST find products that match BOTH
+        // Don't fall back to partial matches
+        if (!empty($brands) && !empty($attrs)) {
+            $this->log('CAT SEARCH: Both brands and attributes specified - using strict matching only');
+            $stages = [
+                [$brands, $attrs, 'all'],
+                [$brands, $attrs, 'any'],
+            ];
+        }
         
         $this->log('CAT SEARCH: Starting with brands='.count($brands).', attrs='.count($attrs).', stages='.count($stages));
 
@@ -1149,6 +1206,7 @@ class Ai_ChatbotApiModuleFrontController extends ModuleFrontController
         // Always use 'all' mode for brand+attribute combinations to ensure proper multi-criteria matching
         $effectiveAttrMode = (!empty($brandIds) && !empty($attrIds)) ? 'all' : $attrMode;
         $this->log('PRODUCT QUERY: Using effective attribute mode: ' . $effectiveAttrMode . ' (original: ' . $attrMode . ')');
+        $this->log('PRODUCT QUERY: Brand IDs: ' . json_encode($brandIds) . ', Attribute IDs: ' . json_encode($attrIds));
         
         if (!empty($brandIds)) {
             $w[] = 'p.id_manufacturer IN ('.implode(',', $brandIds).')';
@@ -1178,25 +1236,22 @@ class Ai_ChatbotApiModuleFrontController extends ModuleFrontController
             }
             
             if ($effectiveAttrMode === 'all') {
-                // For 'all' mode, ensure products have at least one attribute from each group
+                // For 'all' mode, ensure products have ALL specified attributes
                 // This handles cases like "black nike shoes" where we want black AND nike, not black OR nike
-                $groupConditions = [];
                 
-                foreach ($attributeGroups as $groupId => $groupAttrIds) {
-                    $groupAttrIdsStr = implode(',', $groupAttrIds);
-                    $groupConditions[] = "p.id_product IN (
-                        SELECT DISTINCT pa2.id_product
-                        FROM " . _DB_PREFIX_ . "product_attribute pa2
-                        INNER JOIN " . _DB_PREFIX_ . "product_attribute_combination pac2
-                            ON pac2.id_product_attribute = pa2.id_product_attribute
-                        WHERE pac2.id_attribute IN (" . $groupAttrIdsStr . ")
-                    )";
-                }
+                // Always use strict matching for all specified attributes
+                $allAttrCondition = "p.id_product IN (
+                    SELECT pa3.id_product
+                    FROM " . _DB_PREFIX_ . "product_attribute pa3
+                    INNER JOIN " . _DB_PREFIX_ . "product_attribute_combination pac3
+                        ON pac3.id_product_attribute = pa3.id_product_attribute
+                    WHERE pac3.id_attribute IN (" . implode(',', $attrIds) . ")
+                    GROUP BY pa3.id_product
+                    HAVING COUNT(DISTINCT pac3.id_attribute) = " . count($attrIds) . "
+                )";
+                $w[] = $allAttrCondition;
+                $this->log('PRODUCT QUERY: Using strict ALL mode - must have ALL attributes: ' . implode(',', $attrIds));
                 
-                if (!empty($groupConditions)) {
-                    $w[] = '(' . implode(' AND ', $groupConditions) . ')';
-                    $this->log('PRODUCT QUERY: Using ALL mode with ' . count($groupConditions) . ' attribute group conditions');
-                }
             } else {
                 // any of the attributes - standard behavior
                 $w[] = 'p.id_product IN (
@@ -1428,13 +1483,13 @@ class Ai_ChatbotApiModuleFrontController extends ModuleFrontController
         $originalSemThresholdMin = self::SEM_THRESHOLD_MIN;
         $originalSemThresholdMax = self::SEM_THRESHOLD_MAX;
         
-        // Temporarily lower thresholds
-        $this->setConstant('_KW_THRESHOLD_MIN', $originalKwThresholdMin * 0.8);
-        $this->setConstant('_KW_THRESHOLD_MAX', $originalKwThresholdMax * 0.8);
-        $this->setConstant('_SEM_THRESHOLD_MIN', $originalSemThresholdMin * 0.8);
-        $this->setConstant('_SEM_THRESHOLD_MAX', $originalSemThresholdMax * 0.8);
+        // Use higher thresholds to be more selective and avoid false matches
+        $this->setConstant('_KW_THRESHOLD_MIN', $originalKwThresholdMin * 1.2);
+        $this->setConstant('_KW_THRESHOLD_MAX', $originalKwThresholdMax * 1.2);
+        $this->setConstant('_SEM_THRESHOLD_MIN', $originalSemThresholdMin * 1.2);
+        $this->setConstant('_SEM_THRESHOLD_MAX', $originalSemThresholdMax * 1.2);
         
-        // Try standard search with lower thresholds
+        // Try standard search with higher thresholds
         $answer = $this->searchFAQ($userMsg, $lang, $apiKey, $kbAbs, $kbAbs . '.embeddings.json');
         
         // Restore original thresholds
@@ -2574,6 +2629,26 @@ Answer:";
         // Remove extra spaces and normalize
         $text = preg_replace('/\s+/', ' ', trim($text));
         
+        // First, check if this is NOT a specific intent query
+        $specificIntentPatterns = [
+            // Order status patterns
+            '/\b(order|commande|track|suivi|status|statut|where is|où est)\b/iu',
+            // Product search patterns
+            '/\b(show me|find|search|cherche|trouve|looking for|looking|need|want|buy|acheter)\b/iu',
+            // Category patterns
+            '/\b(shoes|clothing|electronics|chaussures|vêtements|électronique)\b/iu',
+            // Brand patterns
+            '/\b(nike|adidas|brand|marque)\b/iu',
+            // Color/size patterns
+            '/\b(red|blue|green|black|white|rouge|bleu|vert|noir|blanc|size|taille)\b/iu'
+        ];
+        
+        foreach ($specificIntentPatterns as $pattern) {
+            if (preg_match($pattern, $text)) {
+                return false; // This is a specific intent, not a general question
+            }
+        }
+        
         // Question word patterns (start of sentence or after punctuation)
         $questionWords = [
             'en' => [
@@ -3421,10 +3496,10 @@ Answer:";
             }
         }
         
-        // Product search queries
+        // Product search queries - dynamic detection based on common patterns
         $searchKeywords = [
-            'en' => ['looking for', 'need', 'want to buy', 'show me', 'find', 'search', 'shoes', 'clothing', 'electronics', 'nike', 'adidas'],
-            'fr' => ['cherche', 'recherche', 'veux', 'besoin', 'trouve', 'acheter', 'chaussures', 'vêtements', 'électronique', 'nike', 'adidas']
+            'en' => ['looking for', 'need', 'want to buy', 'show me', 'find', 'search', 'buy', 'purchase', 'price', 'cost', 'available', 'stock'],
+            'fr' => ['cherche', 'recherche', 'veux', 'besoin', 'trouve', 'acheter', 'prix', 'coût', 'disponible', 'stock', 'achat']
         ];
         
         $allSearch = array_merge($searchKeywords['en'], $searchKeywords['fr']);
@@ -3776,19 +3851,19 @@ Answer:";
             if ($lang === 'fr') {
                 $frenchExamples = "Exemples en français:\n" .
                     "- 'chaussures' -> {\"category\": \"shoes\", \"filters\": []}\n" .
-                    "- 'chaussures nike' -> {\"category\": \"shoes\", \"filters\": [\"nike\"]}\n" .
+                    "- 'vêtements' -> {\"category\": \"clothing\", \"filters\": []}\n" .
                     "- 'robe rouge taille 40' -> {\"category\": \"dresses\", \"filters\": [\"red\", \"40\"]}\n" .
                     "- 'avez-vous des chaussures' -> {\"category\": \"shoes\", \"filters\": []}\n" .
                     "- 'je cherche des vêtements' -> {\"category\": \"clothing\", \"filters\": []}\n" .
-                    "- 't-shirt noir nike' -> {\"category\": \"t-shirts\", \"filters\": [\"black\", \"nike\"]}\n";
+                    "- 't-shirt noir' -> {\"category\": \"t-shirts\", \"filters\": [\"black\"]}\n";
             } else {
                 $englishExamples = "English examples:\n" .
                     "- 'shoes' -> {\"category\": \"shoes\", \"filters\": []}\n" .
-                    "- 'nike shoes' -> {\"category\": \"shoes\", \"filters\": [\"nike\"]}\n" .
+                    "- 'clothing' -> {\"category\": \"clothing\", \"filters\": []}\n" .
                     "- 'red dress size 40' -> {\"category\": \"dresses\", \"filters\": [\"red\", \"40\"]}\n" .
                     "- 'do you have shoes' -> {\"category\": \"shoes\", \"filters\": []}\n" .
                     "- 'I'm looking for clothing' -> {\"category\": \"clothing\", \"filters\": []}\n" .
-                    "- 'black nike t-shirt' -> {\"category\": \"t-shirts\", \"filters\": [\"black\", \"nike\"]}\n";
+                    "- 'black t-shirt' -> {\"category\": \"t-shirts\", \"filters\": [\"black\"]}\n";
             }
             
             // Create language-specific instructions
@@ -3932,7 +4007,7 @@ Answer:";
             $categoryNames[] = "'{$category['name']}'";
         }
         
-        $suggestions = !empty($categoryNames) ? implode(', ', $categoryNames) : ($lang === 'fr' ? "'chaussures', 'vêtements', ou 'électronique'" : "'shoes', 'clothing', or 'electronics'");
+        $suggestions = !empty($categoryNames) ? implode(', ', $categoryNames) : ($lang === 'fr' ? "une catégorie de produits" : "a product category");
         
         return $lang === 'fr' ? 
             "Nous ne trouvons pas cette catégorie. Essayez {$suggestions}." :
@@ -4059,8 +4134,9 @@ Answer:";
             // General product terms
             'color', 'colour', 'couleur', 'brand', 'marque', 'size', 'taille',
             'price', 'prix', 'cheap', 'expensive', 'cher', 'bon marché',
-            // Colors (basic ones)
-            'red', 'blue', 'green', 'black', 'white', 'rouge', 'bleu', 'vert', 'noir', 'blanc',
+            // Colors (basic ones) - dynamic detection
+            'red', 'blue', 'green', 'black', 'white', 'yellow', 'orange', 'purple', 'pink', 'brown', 'gray', 'grey',
+            'rouge', 'bleu', 'vert', 'noir', 'blanc', 'jaune', 'orange', 'violet', 'rose', 'marron', 'gris',
             // Sizes
             'small', 'medium', 'large', 'petit', 'moyen', 'grand', 'xs', 'xl', 's', 'm', 'l',
             // Common materials/styles
@@ -4555,37 +4631,44 @@ Answer:";
         $isQuestion = $this->isGeneralQuestion($message);
         $this->log('FAQ: Message is a question: ' . ($isQuestion ? 'yes' : 'no'));
         
-        // For French queries, translate to English for better KB matching
-        $searchQuery = $message;
-        $originalLang = $lang;
-        if ($lang === 'fr') {
-            $searchQuery = $this->translateForProcessing($message, $lang);
-            $this->log('FAQ: Translated FR query to: "' . substr($searchQuery, 0, 100) . '"');
-        }
-        
         $answer = null;
         
-        // Try embeddings first if available
-        if ($apiKey && $embFile && is_file($embFile)) {
-            $this->log('FAQ: Trying embeddings search with query: "' . substr($searchQuery, 0, 50) . '..."');
-            // Pass the original language to ensure proper threshold adjustment
-            $answer = $this->searchFAQWithEmbeddings($searchQuery, $apiKey, $embFile, $isQuestion, $originalLang);
-        }
-        
-        // Fallback to text search
-        if (!$answer && $kbFile && is_file($kbFile)) {
-            $this->log('FAQ: Trying raw text search with query: "' . substr($searchQuery, 0, 50) . '..."');
-            $rawText = @file_get_contents($kbFile) ?: '';
-            if ($rawText !== '') {
-                $answer = $this->searchFAQInText($searchQuery, $rawText);
+        // For French queries, search directly in French FAQ without translation
+        if ($lang === 'fr') {
+            $this->log('FAQ: Searching directly in French FAQ');
+            
+            // Try embeddings first if available
+            if ($apiKey && $embFile && is_file($embFile)) {
+                $this->log('FAQ: Trying French embeddings search with query: "' . substr($message, 0, 50) . '..."');
+                $answer = $this->searchFAQWithEmbeddings($message, $apiKey, $embFile, $isQuestion, $lang);
             }
-        }
-        
-        // Translate answer back to original language if needed
-        if ($answer && $originalLang === 'fr') {
-            $this->log('FAQ: Translating answer back to French');
-            $answer = $this->translate($answer, 'fr', 'en', 'faq_answer');
-            $this->log('FAQ: Translated answer: "' . substr($answer, 0, 100) . '"');
+            
+            // Fallback to text search
+            if (!$answer && $kbFile && is_file($kbFile)) {
+                $this->log('FAQ: Trying French raw text search with query: "' . substr($message, 0, 50) . '..."');
+                $rawText = @file_get_contents($kbFile) ?: '';
+                if ($rawText !== '') {
+                    $answer = $this->searchFAQInText($message, $rawText);
+                }
+            }
+        } else {
+            // For English queries, use the original logic
+            $searchQuery = $message;
+            
+            // Try embeddings first if available
+            if ($apiKey && $embFile && is_file($embFile)) {
+                $this->log('FAQ: Trying English embeddings search with query: "' . substr($searchQuery, 0, 50) . '..."');
+                $answer = $this->searchFAQWithEmbeddings($searchQuery, $apiKey, $embFile, $isQuestion, $lang);
+            }
+            
+            // Fallback to text search
+            if (!$answer && $kbFile && is_file($kbFile)) {
+                $this->log('FAQ: Trying English raw text search with query: "' . substr($searchQuery, 0, 50) . '..."');
+                $rawText = @file_get_contents($kbFile) ?: '';
+                if ($rawText !== '') {
+                    $answer = $this->searchFAQInText($searchQuery, $rawText);
+                }
+            }
         }
         
         return $answer;
